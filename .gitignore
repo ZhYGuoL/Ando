@@ -1,3 +1,13 @@
 node_modules
 dist
 .DS_Store
+
+# Product specs and design docs (local only)
+docs/
+brand.md
+product.md
+COMPLETION_CARD.md
+PERMISSION_CARD.md
+
+# Cursor IDE project rules (local only)
+.cursor/

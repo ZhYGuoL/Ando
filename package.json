@@ -1,7 +1,7 @@
 {
-  "name": "ando",
+  "name": "nave",
   "version": "1.0.0",
-  "description": "UI shell for the Nave workspace.",
+  "description": "Nave — team workspace UI shell.",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,15 +11,15 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ZhYGuoL/Ando.git"
+    "url": "git+https://github.com/ZhYGuoL/Nave.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/ZhYGuoL/Ando/issues"
+    "url": "https://github.com/ZhYGuoL/Nave/issues"
   },
-  "homepage": "https://github.com/ZhYGuoL/Ando#readme",
+  "homepage": "https://github.com/ZhYGuoL/Nave#readme",
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.7",
     "@fontsource/ibm-plex-sans": "^5.2.8",
