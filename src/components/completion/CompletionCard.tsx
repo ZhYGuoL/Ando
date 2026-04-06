@@ -1,6 +1,6 @@
 export type CompletionCardState = 'running' | 'completed' | 'killed' | 'failed'
 
-/** Tokens from brand.md + product-required completion / semantic hues */
+/** Completion card tokens / semantic hues */
 const C = {
   primary: '#0f0f0f',
   /** `--color-surface` — cards off feed paper (`#f5f4f0`) */

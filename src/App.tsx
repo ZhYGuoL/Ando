@@ -1869,7 +1869,7 @@ function DetailCard({
 }: {
   label: string
   value: string
-  /** Single focal metric — IKB value per brand.md */
+  /** Single focal metric — IKB */
   highlight?: 'primary'
 }) {
   const isPrimary = highlight === 'primary'
