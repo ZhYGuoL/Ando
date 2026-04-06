@@ -1,3 +1,6 @@
 node_modules
 dist
 .DS_Store
+
+# Agent / worktree context notes (local only — not committed)
+docs/branches/CONTEXT-*.md
