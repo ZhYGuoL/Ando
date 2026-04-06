@@ -1,0 +1,264 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+:root {
+  color: #0f0f0f;
+  background: #f5f4f0;
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  --nave-float-ease: cubic-bezier(0.16, 1, 0.35, 1);
+  --nave-float-duration: 420ms;
+  --nave-float-duration-short: 280ms;
+  --nave-drawer-duration: 420ms;
+  --nave-float-lift: 2px;
+  --nave-float-lift-dark: 1px;
+
+  /* Sidebar: warm ink (ties to shell #f5f4f0 — not flat #000) */
+  --nave-sidebar-bg: #151311;
+  --nave-sidebar-border: #2e2925;
+  --nave-sidebar-hover: #1f1c18;
+  --nave-sidebar-row-active: #25211d;
+  --nave-sidebar-row-active-border: #524a43;
+  --nave-sidebar-text-secondary: #ddd8d2;
+  --nave-sidebar-text-muted: #8f877d;
+  --nave-sidebar-subtle: #9c958c;
+  --nave-sidebar-user-avatar: #3a3530;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  min-width: 320px;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #d4d0c8 transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #d4d0c8;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #9a9a9a;
+}
+
+/* —— Nave floaty motion (see brand.md — Motion) —— */
+
+.nave-float {
+  transition:
+    transform var(--nave-float-duration) var(--nave-float-ease),
+    opacity var(--nave-float-duration-short) ease-out,
+    border-color var(--nave-float-duration-short) ease-out,
+    background-color var(--nave-float-duration-short) ease-out,
+    color 200ms ease-out;
+}
+
+.nave-rise:hover:not(:disabled) {
+  transform: translateY(calc(-1 * var(--nave-float-lift)));
+}
+
+.nave-rise:active:not(:disabled) {
+  transform: translateY(-1px) scale(0.98);
+  transition-duration: 140ms;
+}
+
+.nave-rise-dark:hover:not(:disabled) {
+  transform: translateY(calc(-1 * var(--nave-float-lift-dark)));
+}
+
+.nave-rise-dark:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
+  transition-duration: 140ms;
+}
+
+/* Panels: transition only — pair with Tailwind hover:border-* per surface (no translate) */
+.nave-surface {
+  transition:
+    border-color var(--nave-float-duration-short) ease-out,
+    background-color var(--nave-float-duration-short) ease-out;
+}
+
+@keyframes nave-enter {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.nave-enter {
+  animation: nave-enter 0.68s var(--nave-float-ease) both;
+}
+
+.nave-stagger > * {
+  animation: nave-enter 0.68s var(--nave-float-ease) both;
+}
+
+.nave-stagger > :nth-child(1) {
+  animation-delay: 0ms;
+}
+.nave-stagger > :nth-child(2) {
+  animation-delay: 48ms;
+}
+.nave-stagger > :nth-child(3) {
+  animation-delay: 96ms;
+}
+.nave-stagger > :nth-child(4) {
+  animation-delay: 144ms;
+}
+.nave-stagger > :nth-child(5) {
+  animation-delay: 192ms;
+}
+.nave-stagger > :nth-child(6) {
+  animation-delay: 240ms;
+}
+.nave-stagger > :nth-child(7) {
+  animation-delay: 288ms;
+}
+.nave-stagger > :nth-child(8) {
+  animation-delay: 336ms;
+}
+.nave-stagger > :nth-child(9) {
+  animation-delay: 384ms;
+}
+.nave-stagger > :nth-child(10) {
+  animation-delay: 432ms;
+}
+.nave-stagger > :nth-child(11) {
+  animation-delay: 480ms;
+}
+.nave-stagger > :nth-child(12) {
+  animation-delay: 528ms;
+}
+.nave-stagger > :nth-child(13) {
+  animation-delay: 576ms;
+}
+.nave-stagger > :nth-child(14) {
+  animation-delay: 624ms;
+}
+.nave-stagger > :nth-child(15) {
+  animation-delay: 672ms;
+}
+.nave-stagger > :nth-child(16) {
+  animation-delay: 720ms;
+}
+.nave-stagger > :nth-child(17) {
+  animation-delay: 768ms;
+}
+.nave-stagger > :nth-child(18) {
+  animation-delay: 816ms;
+}
+.nave-stagger > :nth-child(19) {
+  animation-delay: 864ms;
+}
+.nave-stagger > :nth-child(20) {
+  animation-delay: 912ms;
+}
+
+/* Workspace channel header: smooth expand/collapse without animating height:auto */
+.workspace-header-drawer {
+  display: grid;
+  transition:
+    grid-template-rows var(--nave-drawer-duration) var(--nave-float-ease),
+    opacity var(--nave-float-duration-short) ease-out;
+}
+
+.workspace-header-drawer.is-closed {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.workspace-header-drawer.is-open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.workspace-header-drawer-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.workspace-header-drawer-content {
+  transition: transform var(--nave-drawer-duration) var(--nave-float-ease);
+}
+
+.workspace-header-drawer.is-open .workspace-header-drawer-content {
+  transform: translateY(0);
+}
+
+.workspace-header-drawer.is-closed .workspace-header-drawer-content {
+  transform: translateY(-12px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nave-float,
+  .nave-rise,
+  .nave-rise-dark,
+  .nave-rise-static,
+  .workspace-header-drawer,
+  .workspace-header-drawer-content {
+    transition: none !important;
+    animation: none !important;
+  }
+
+  .nave-rise:hover:not(:disabled),
+  .nave-rise-dark:hover:not(:disabled) {
+    transform: none;
+  }
+
+
+  .nave-rise:active:not(:disabled),
+  .nave-rise-dark:active:not(:disabled) {
+    transform: none;
+  }
+
+  .nave-enter,
+  .nave-stagger > * {
+    animation: none !important;
+    opacity: 1 !important;
+  }
+
+  .workspace-header-drawer.is-closed .workspace-header-drawer-content {
+    transform: none;
+  }
+}
