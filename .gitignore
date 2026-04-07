@@ -1,3 +1,16 @@
 node_modules
 dist
 .DS_Store
+
+# Product specs and design docs (local only).
+# Track docs/branches/ (CONTEXT-*.md, README) so worktrees stay aligned; ignore the rest of docs/.
+docs/*
+!docs/branches/
+!docs/branches/**
+brand.md
+product.md
+COMPLETION_CARD.md
+PERMISSION_CARD.md
+
+# Cursor IDE project rules (local only)
+.cursor/

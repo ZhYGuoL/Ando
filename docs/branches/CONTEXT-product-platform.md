@@ -1,38 +1,42 @@
 # Context: `product/platform`
 
+## Cursor session rules (read first)
+
+- **Workspace folder:** Cursor **Open Folder** must be **`Ando-product`**, the worktree on **`product/platform`**. If the root is `Ando` or `Ando-demo`, stop and tell the human to open the correct folder.
+- **One chat = this worktree only:** Edits belong under this worktree root only unless the human explicitly shares another path.
+- **Git:** Commit and push from **`product/platform`**. Regularly **`git merge main`** here to reduce drift with shared UI.
+- **Secrets:** API keys and provider credentials live on the **server / BFF** — never commit them; never put them in client env vars that ship to the browser.
+- **`docs/branches/` is tracked;** **`brand.md`** / **`product.md`** and other **`docs/`** may be local-only — sync from the human’s canonical tree if needed.
+- **Sidebar:** If `docs/` is hidden, use **Cmd+P** or disable “Explorer: Exclude Git Ignore.”
+
 ## If you are the “product” agent
 
-You own the **`product/platform`** branch and the **`Ando-product`** worktree. Your goal is a **v1-shaped product**: state **survives refresh**, API boundaries are real, and secrets never ship in the browser.
+You own the **`product/platform`** branch and the **`Ando-product`** worktree. Your goal is a **v1-shaped product**: state **survives refresh**, API boundaries are real, secrets never ship in the browser.
 
-## What exists today (shared baseline)
+## Before you write code
 
-Same UI and Zustand shapes as [CONTEXT-main.md](./CONTEXT-main.md). The client already models:
+1. Read **`brand.md`** (repo root) in full — design system, motion, IKB usage.
+2. Read **`product.md`** (repo root) in full — screens, feed semantics, permission/completion patterns.
 
-- **`FeedMessage`** / **`StoreAgent`** / **`permissionCardStates`** — treat these as your **DTO targets** for APIs and persistence.
-- **Selectors** — e.g. `selectMissionControlActivityFeed`, `selectCockpitTaskHistoryMerged`, `selectLastHumanInteractionLabel` — keep server data consistent enough that selectors keep working without forking the app into “two truths.”
+Those two files are the **binding** context for how Nave should look and behave while you add persistence and APIs.
 
-## What you should focus on
+## `docs/01`–`04`
 
-1. **Persistence** — Introduce a backend store (e.g. **Supabase** or Firebase) for workspaces, channels, messages, permission card state, and optionally agent snapshots. Map rows ↔ existing types in `src/store/index.ts`.
-2. **BFF / serverless** — API keys for LLM providers live **only** on the server. Thin routes: `POST` message/agent step, `PATCH` approval, etc. Client calls **your** origin, not OpenAI/Anthropic directly from the bundle.
-3. **Load and hydration** — Replace or augment initial `create()` seed with `fetch`/subscription that fills `messages` and `agents`; keep **optimistic updates** and error states in mind for approvals.
-4. **Auth (minimal v1)** — Workspace-scoped identity (magic link, OAuth, or SSO-lite) so URLs and data are not global-demo fiction.
-5. **Idempotency and audit** — Approve/deny should be safe to retry; log **who** approved **what** for mission control trust.
+Optional background: **`docs/01`–`04`** are scraped notes on agents, memory, queues, and observability (e.g. Claude Code–style framing). **Take inspiration only** — they are not specifications you must implement wholesale; prefer **`product.md`** and real Nave UX when they conflict.
 
-## What to avoid on this branch
+## Suggested scope
 
-- **Long-lived divergence** from `main` on shared components without merging — rebase/merge `main` regularly.
-- Rewriting **brand/layout contracts** in `brand.md` without explicit approval (demo line may depend on them).
-- Blocking on hyperscaler “agent platforms” (Bedrock agents, full RAG) until **one channel** is end-to-end with your BFF + DB.
+- **Persistence** — e.g. Supabase for workspaces, channels, messages, permission state; map rows ↔ types in `src/store/index.ts`.
+- **BFF / serverless** — API keys only on the server; client calls your API.
+- **Auth (minimal v1)** — workspace-scoped identity.
+- **Idempotency and audit** — approve/deny safe to retry; record who approved what.
 
-## Sync expectations
+## Do / don’t
 
-- **Merge `main`** often for UI fixes; **cherry-pick** from `demo/quick-demo` only when changes are not demo-hacky.
-- **Push** to `origin product/platform`.
-- **Migrations and env** — document in-repo (e.g. `docs/` or `.env.example`); never commit secrets.
+- **Merge `main`** often for UI fixes.
+- **Don’t** block on hyperscaler agent platforms until **one channel** is end-to-end.
 
 ## Related
 
-- [CONTEXT-main.md](./CONTEXT-main.md)  
-- [CONTEXT-demo-quick-demo.md](./CONTEXT-demo-quick-demo.md)  
-- `docs/02-memory-persistence.md`, `docs/03-messaging-queues-and-channel-patterns.md` — data model hints  
+- `CONTEXT-main.md`  
+- `CONTEXT-demo-quick-demo.md`  

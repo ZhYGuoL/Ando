@@ -37,7 +37,7 @@ export type PermissionCardProps = {
   actions?: PermissionCardInteractionHandlers
 }
 
-/** Brand tokens — from brand.md only (`--color-surface` lifts cards off `--color-background` paper) */
+/** Brand tokens — `--color-surface` lifts cards off `--color-background` paper */
 const C = {
   primary: '#0f0f0f',
   cardSurface: '#ebebeb',

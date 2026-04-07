@@ -1,39 +1,44 @@
 # Context: `demo/quick-demo`
 
+## Cursor session rules (read first)
+
+- **Workspace folder:** Cursor **Open Folder** must be **`Ando-demo`** (sibling of `Ando` on disk), the worktree checked out on **`demo/quick-demo`**. If the root is `Ando` or `Ando-product`, stop and tell the human to open the correct folder — otherwise commits and branch will be wrong.
+- **One chat = this worktree only:** Do not edit paths under `../Ando` or `../Ando-product` unless the human explicitly pastes files from there; your edits should live under this worktree root.
+- **Git:** Commit and push from **`demo/quick-demo`**. Before big sessions, **`git merge main`** (or rebase if the team prefers) in this folder to pick up shared fixes.
+- **`docs/branches/` is tracked;** **`brand.md`** / **`product.md`** and other **`docs/`** files may be local-only — keep copies in sync with the human’s canonical tree (often the `Ando` folder) if `@` references fail.
+- **Sidebar:** If ignored files are hidden, use **Cmd+P** or turn off “Explorer: Exclude Git Ignore.”
+
 ## If you are the “demo” agent
 
-You own the **`demo/quick-demo`** branch and the **`Ando-demo`** worktree (sibling folder to `Ando`, same remote branches). Your goal is a **credible, fast-to-ship demo**: narrative clarity beats production completeness.
+You own the **`demo/quick-demo`** branch and the **`Ando-demo`** worktree (sibling folder to the main repo, same remote branches). Your goal is a **credible, fast-to-ship demo**: narrative clarity beats production completeness.
 
-## What exists today (shared baseline)
+## Before you write code
 
-Everything described in [CONTEXT-main.md](./CONTEXT-main.md) is already in your tree once you merge `main` — full **four-screen UI**, **Zustand** models, **seeded** multi-channel story:
+1. Read **`brand.md`** (repo root) in full — design system, motion, IKB usage.
+2. Read **`product.md`** (repo root) in full — screens, feed semantics, what “Nave” is supposed to feel like.
 
-- **#frontend** — Patch, settings / lazy-bundle permission, subprocess trace, approve → completion path in store actions.
-- **#infra** — Scout (`backend`), blocked with a **real pending permission** card (`msg-i-003`) so mission control and feed stay consistent.
-- **#release-train** — light thread for Mux so **last human interaction** is feed-derived.
+Those two files are the **binding** context for UI and product behavior on this branch.
 
-**Do not** reintroduce a second “legacy” agents array in `App.tsx`; identity and status come from **`store.agents`**.
+## `docs/01`–`04`
 
-## What you should focus on
+Optional background: **`docs/01`–`04`** are scraped notes on agents, memory, and observability (e.g. Claude Code–style framing). **Take inspiration only** — they are not specs you must follow 100%.
 
-1. **One golden path** — Assign → agent reply → permission → approve (or deny) → completion / mission control updates — feels obvious in under two minutes.
-2. **Scripted or in-app “demo controls”** — Dev-only or subtle controls that advance the store (new messages, toggle states) **without** requiring a backend.
-3. **Static deploy** — App should run from `npm run build` + static host (Vercel/Netlify/Cloudflare Pages) with **no secrets** in the client beyond public demo config if any.
-4. **Optional single LLM call** — One serverless endpoint is acceptable on this line **if** it stays optional and does not block the static demo; avoid pulling in full DB stack here.
+## Suggested scope
 
-## What to avoid on this branch
+- Keep **Zustand + seed** as source of truth; add **scripted actions** (buttons, dev shortcuts) that mutate messages/agents/permission state.
+- Deploy **static** (Vercel / Netlify / Cloudflare Pages). No server required for the happy path.
+- Optional: **one serverless function** + model API for a single “real” agent reply; still no DB.
 
-- **Supabase / Postgres / multi-tenant auth** as a prerequisite for the demo (that belongs on `product/platform`).
-- Large “product-only” migrations that make merging back to `main` painful.
-- Duplicating business logic that already lives in **`src/store`** — extend the store and selectors instead.
+## Do / don’t
 
-## Sync expectations
+- **Do:** One polished path (assign → permission → approve → completion → mission control).
+- **Don’t:** Supabase / auth as a prerequisite for the demo (that belongs on `product/platform`).
 
-- **Merge `main` in** when the integration branch gets bugfixes or doc updates you need.
-- **Push** to `origin demo/quick-demo`; use **`--force-with-lease`** only if you intentionally rewrote history.
-- When UX changes are stable and product-agnostic, **open a PR or merge to `main`** so `product/platform` can absorb them.
+## Merge strategy
+
+Merge **UI fixes** into `main` or `product/platform` when stable; avoid dragging heavy product infra back into this branch.
 
 ## Related
 
-- [CONTEXT-main.md](./CONTEXT-main.md)  
-- [CONTEXT-product-platform.md](./CONTEXT-product-platform.md)  
+- `CONTEXT-main.md`  
+- `CONTEXT-product-platform.md`  
