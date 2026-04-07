@@ -18,18 +18,17 @@ Folder names may differ on your machine; infer the **active branch** with `git b
 - “Pulling” in one folder only updates **that folder’s checked-out branch**. To bring `.gitignore`, tooling, or shared fixes onto a feature line, run `git merge main` (or equivalent) **from that line’s worktree**.
 - Treat **one Cursor window / one agent session ≈ one worktree** unless the human explicitly points you at another path.
 
-## Specs and docs (often missing on a fresh clone)
+## Specs and docs (fresh clone)
 
-These paths are **gitignored** and may **not exist** after `git clone`:
+**Tracked in Git:** `docs/branches/` (`README.md`, `CONTEXT-*.md`) — same on every branch after you merge.
 
-- `brand.md`, `product.md` (repo root)
-- `docs/` (including `docs/branches/`)
+**Usually gitignored (may be missing on clone):** `brand.md`, `product.md` (repo root), and other paths under `docs/` outside `docs/branches/` (e.g. scratch notes).
 
-If they are absent, **do not invent** product or brand requirements—say they’re missing and ask the human to add copies. When they exist locally, read `brand.md` and `product.md` before substantial UI work.
+If `brand.md` / `product.md` are absent, **do not invent** product or brand requirements — say they’re missing and ask the human to add copies. When they exist locally, read them before substantial UI work.
 
-## Richer, branch-specific instructions (local only)
+## Branch-specific agent context
 
-If the human has a local `docs/` tree, optional session rules live next to `docs/branches/README.md`:
+Session rules live next to `docs/branches/README.md`:
 
 | Branch            | Context file |
 |-------------------|--------------|
