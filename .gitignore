@@ -2,8 +2,11 @@ node_modules
 dist
 .DS_Store
 
-# Product specs, design docs, and local branch context (local only)
-docs/
+# Product specs and design docs (local only).
+# Track docs/branches/ (CONTEXT-*.md, README) so worktrees stay aligned; ignore the rest of docs/.
+docs/*
+!docs/branches/
+!docs/branches/**
 brand.md
 product.md
 COMPLETION_CARD.md

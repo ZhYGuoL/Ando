@@ -21,4 +21,4 @@ See **[AGENTS.md](AGENTS.md)** — worktrees, branches, git sync expectations, a
 - `src/store/` — Zustand store, selectors, seed data  
 - `src/components/` — permission and completion cards, feed message chrome  
 
-Design and product notes (`docs/`, `brand.md`, `product.md`, etc.) are intentionally **not committed**; keep copies locally if you use them.
+**Agent / worktree context** under `docs/branches/` is **committed** so all branches can share the same `CONTEXT-*.md` files after merging. **`brand.md`**, **`product.md`**, and most other **`docs/`** content stay **local-only**; keep copies if you use them.
