@@ -2,6 +2,12 @@ node_modules
 dist
 .DS_Store
 
-# Local branch context — not shared via remote
-docs/branches/CONTEXT-demo-vision.md
-docs/branches/CONTEXT-demo-quick-demo.md
+# Product specs, design docs, and local branch context (local only)
+docs/
+brand.md
+product.md
+COMPLETION_CARD.md
+PERMISSION_CARD.md
+
+# Cursor IDE project rules (local only)
+.cursor/

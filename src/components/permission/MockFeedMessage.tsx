@@ -11,7 +11,7 @@ type MockFeedMessageProps = {
    */
   continuingLine?: boolean
   /**
-   * `agent` — IKB avatar and name per product.md (agent messages).
+   * `agent` — IKB avatar and name styling (agent messages).
    * `human` — neutral avatar (default).
    */
   variant?: 'human' | 'agent'
