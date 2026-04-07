@@ -11,6 +11,10 @@ Team workspace UI: channels, agent feed, permission and completion cards, agent 
 | `npm run preview`  | Preview production build    |
 | `npm run lint`     | ESLint                      |
 
+## For AI assistants
+
+See **[AGENTS.md](AGENTS.md)** — worktrees, branches, git sync expectations, and where specs may live.
+
 ## Layout
 
 - `src/App.tsx` — routes, workspace, home, cockpit, sub-process views  
