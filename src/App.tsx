@@ -6,6 +6,7 @@ import {
   type PermissionCardInteractionHandlers,
   type PermissionCardState,
 } from './components/permission/PermissionCard'
+import { DemoControls } from './components/demo/DemoControls'
 import {
   type FeedMessage,
   type MissionFeedEvent,
@@ -16,10 +17,12 @@ import {
   MISSION_AGENT_CARD_ORDER,
   selectCockpitMemoryMerged,
   selectCockpitTaskHistoryMerged,
-  selectLastHumanMentionForAgent,
   selectLastHumanInteractionLabel,
+  selectLastHumanMentionForAgent,
+  selectLatestFrontendCompletionBanner,
   selectMissionControlActivityFeed,
   selectMissionControlPendingRows,
+  selectWorkspaceHeaderMetrics,
   useNaveStore,
 } from './store'
 import {
@@ -92,12 +95,6 @@ const channels: Channel[] = [
   { name: 'infra', unread: false },
   { name: 'release-train', unread: false },
   { name: 'memory-lab', unread: false },
-]
-
-const workspaceMetrics = [
-  { label: 'Sub-processes', value: '03' },
-  { label: 'Pending approvals', value: '01' },
-  { label: 'Queue priority', value: 'Now' },
 ]
 
 const channelSummaries: Record<string, string> = {
@@ -264,6 +261,7 @@ function AppLayout() {
           onSelectAgent={goAgentFromSidebar}
         />
         <Outlet />
+        <DemoControls />
       </div>
     </div>
   )
@@ -897,6 +895,26 @@ function WorkspaceScreen({
   onCompletionViewRunLog: () => void
 }) {
   const [completionNoticeOpen, setCompletionNoticeOpen] = useState(false)
+  const messages = useNaveStore((s) => s.messages)
+  const agents = useNaveStore((s) => s.agents)
+  const permissionCardStates = useNaveStore((s) => s.permissionCardStates)
+  const headerMetrics = useMemo(
+    () => selectWorkspaceHeaderMetrics({ messages, agents, permissionCardStates }),
+    [messages, agents, permissionCardStates],
+  )
+  const workspaceMetrics = useMemo(
+    () => [
+      { label: 'Sub-processes', value: headerMetrics.subProcesses },
+      { label: 'Pending approvals', value: headerMetrics.pendingApprovals },
+      { label: 'Queue priority', value: headerMetrics.queuePriority },
+    ],
+    [headerMetrics],
+  )
+  const completionBanner = useMemo(
+    () => selectLatestFrontendCompletionBanner({ messages }),
+    [messages],
+  )
+  const bannerExpanded = Boolean(completionBanner) && completionNoticeOpen
 
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -1010,16 +1028,19 @@ function WorkspaceScreen({
         </div>
       </header>
 
-      <div
-        key={selectedChannelName}
-        className="flex min-h-0 min-w-0 flex-1 flex-col"
-      >
-        <div className="nave-enter nave-float border-b border-[#cfd7eb] bg-[#eef3ff] px-8 py-2.5 transition-colors">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            {completionNoticeOpen ? (
+        <div
+          key={selectedChannelName}
+          className="flex min-h-0 min-w-0 flex-1 flex-col"
+        >
+        {completionBanner && selectedChannelName === 'frontend' ? (
+          <div className="nave-enter nave-float border-b border-[#cfd7eb] bg-[#eef3ff] px-8 py-2.5 transition-colors">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+            {bannerExpanded ? (
               <>
                 <p className="text-[13px] text-[#303030]">
-                  `Scout` finished consolidating permission patterns for `src/queue/permission-sync.ts`.
+                  <span className="font-medium text-[#0f0f0f]">Patch</span> completed{' '}
+                  {completionBanner.taskName}. {completionBanner.filesLabel} in{' '}
+                  {completionBanner.durationSnippet}.
                 </p>
                 <div className="flex flex-wrap items-center gap-3">
                   <button
@@ -1038,23 +1059,24 @@ function WorkspaceScreen({
                 </div>
               </>
             ) : (
-              <>
-                <p className="text-[12px] text-[#5f5f5f]">
-                  <span className="font-medium text-[#0f0f0f]">Completion</span>
-                  {' · '}
-                  Scout updated `permission-sync.ts`
-                </p>
-                <button
-                  type="button"
-                  onClick={() => setCompletionNoticeOpen(true)}
-                  className="nave-float nave-rise text-[12px] text-[#002FA7] underline underline-offset-4"
-                >
-                  Show details
-                </button>
-              </>
-            )}
+                <>
+                  <p className="text-[12px] text-[#5f5f5f]">
+                    <span className="font-medium text-[#0f0f0f]">Completion</span>
+                    {' · '}
+                    Patch · {completionBanner.taskName}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setCompletionNoticeOpen(true)}
+                    className="nave-float nave-rise text-[12px] text-[#002FA7] underline underline-offset-4"
+                  >
+                    Show details
+                  </button>
+                </>
+              )}
+            </div>
           </div>
-        </div>
+        ) : null}
 
         <section className="min-h-0 flex-1 overflow-y-auto px-8 py-8">
           <div className="nave-stagger mx-auto flex max-w-4xl flex-col gap-8">
@@ -1158,13 +1180,13 @@ function HomeScreen({
   onNavigateToChannel: (channelKey: string, focusMessageId?: string) => void
 }) {
   const [activityFeedOpen, setActivityFeedOpen] = useState(false)
-  const [, setTimeTicker] = useState(0)
+  const [nowMs, setNowMs] = useState(() => Date.now())
   const messages = useNaveStore((s) => s.messages)
   const permissionCardStates = useNaveStore((s) => s.permissionCardStates)
   const storeAgents = useNaveStore((s) => s.agents)
 
   useEffect(() => {
-    const id = window.setInterval(() => setTimeTicker((n) => n + 1), 60_000)
+    const id = window.setInterval(() => setNowMs(Date.now()), 60_000)
     return () => window.clearInterval(id)
   }, [])
 
@@ -1303,7 +1325,7 @@ function HomeScreen({
                   <p className="text-[13px] text-[#5f5f5f]">No pending permission requests.</p>
                 ) : (
                   pendingRows.map((row) => {
-                    const waitingMs = Math.max(0, Date.now() - new Date(row.timestampDateTime).getTime())
+                    const waitingMs = Math.max(0, nowMs - new Date(row.timestampDateTime).getTime())
                     return (
                       <button
                         key={row.messageId}

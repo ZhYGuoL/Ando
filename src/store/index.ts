@@ -116,6 +116,7 @@ export type CockpitTaskHistoryRow = {
 
 export const FRONTEND_PERMISSION_MESSAGE_ID = 'msg-f-004'
 export const BACKEND_PERMISSION_MESSAGE_ID = 'msg-i-003'
+export const FRONTEND_COMPLETION_MESSAGE_ID = 'msg-f-completion'
 
 const REVIEW_DELAY_MS = 800
 
@@ -842,7 +843,7 @@ function seedAllMessages(): FeedMessage[] {
 
 function completionMessage(): FeedMessage {
   return {
-    id: 'msg-f-completion',
+    id: FRONTEND_COMPLETION_MESSAGE_ID,
     channelId: 'frontend',
     type: 'agent',
     authorId: 'frontend',
@@ -895,11 +896,72 @@ export type NaveStore = {
   permissionAlwaysAllow: (messageId: string) => void
   permissionAlwaysAllowConfirm: (messageId: string) => void
   permissionAlwaysAllowCancel: (messageId: string) => void
+  /** Restore seeded demo state for repeat recording takes. */
+  demoReset: () => void
 }
 
 function appendCompletionIfMissing(list: FeedMessage[]): FeedMessage[] {
-  if (list.some((m) => m.id === 'msg-f-completion')) return list
+  if (list.some((m) => m.id === FRONTEND_COMPLETION_MESSAGE_ID)) return list
   return [...list, completionMessage()]
+}
+
+export type WorkspaceCompletionBanner = {
+  taskName: string
+  filesLabel: string
+  durationSnippet: string
+}
+
+/** Latest Patch completion in #frontend — drives the IKB workspace banner (third completion signal). */
+export function selectLatestFrontendCompletionBanner(
+  state: Pick<NaveStore, 'messages'>,
+): WorkspaceCompletionBanner | null {
+  const hits = state.messages.filter(
+    (m) =>
+      m.channelId === 'frontend' &&
+      m.authorId === 'frontend' &&
+      m.completionCard?.state === 'completed',
+  )
+  const top = hits.sort((a, b) => missionTs(b.timestampDateTime) - missionTs(a.timestampDateTime))[0]
+  if (!top?.completionCard) return null
+  const c = top.completionCard
+  const durationSnippet =
+    c.stats.durationLabel.replace(/^\s*Completed\s*·\s*/i, '').trim() || c.stats.durationLabel
+  return {
+    taskName: c.taskName,
+    filesLabel: `${c.stats.files} files`,
+    durationSnippet,
+  }
+}
+
+export function selectWorkspaceHeaderMetrics(
+  state: Pick<NaveStore, 'agents' | 'messages' | 'permissionCardStates'>,
+): { subProcesses: string; pendingApprovals: string; queuePriority: string } {
+  const subTotal = Object.values(state.agents).reduce(
+    (acc, a) => acc + a.currentTask.subProcessCount,
+    0,
+  )
+  const pending = selectMissionControlPendingRows(state).length
+  return {
+    subProcesses: String(subTotal).padStart(2, '0'),
+    pendingApprovals: String(pending).padStart(2, '0'),
+    queuePriority: 'Now',
+  }
+}
+
+function initialDataSlice(): Pick<
+  NaveStore,
+  'messages' | 'permissionCardStates' | 'agents' | 'lastViewedProcessId' | 'activeChannel'
+> {
+  return {
+    messages: seedAllMessages(),
+    permissionCardStates: {
+      [FRONTEND_PERMISSION_MESSAGE_ID]: 'pending',
+      [BACKEND_PERMISSION_MESSAGE_ID]: 'pending',
+    },
+    agents: seedAgents(),
+    lastViewedProcessId: null,
+    activeChannel: 'frontend',
+  }
 }
 
 function applyFrontendPostApproval(get: () => NaveStore) {
@@ -1011,14 +1073,7 @@ export const useNaveStore = create<NaveStore>((set, get) => {
   }
 
   return {
-    messages: seedAllMessages(),
-    permissionCardStates: {
-      [FRONTEND_PERMISSION_MESSAGE_ID]: 'pending',
-      [BACKEND_PERMISSION_MESSAGE_ID]: 'pending',
-    },
-    agents: seedAgents(),
-    lastViewedProcessId: null,
-    activeChannel: 'frontend',
+    ...initialDataSlice(),
 
     setActiveChannel: (channelId) => set({ activeChannel: channelId }),
 
@@ -1078,5 +1133,7 @@ export const useNaveStore = create<NaveStore>((set, get) => {
         permissionCardStates: { ...permissionCardStates, [messageId]: 'pending' },
       })
     },
+
+    demoReset: () => set(initialDataSlice()),
   }
 })
