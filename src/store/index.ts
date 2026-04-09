@@ -251,25 +251,67 @@ function selectLatestHumanMentionMessage(
   return hits[0] ?? null
 }
 
-export function selectLastHumanMentionForAgent(
+/** Removes a leading @mention of this agent so card copy focuses on what they said. */
+function stripLeadingSelfMention(body: string, agent: StoreAgent): string {
+  const name = agent.name.trim()
+  const id = agent.id.trim()
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const patterns = [
+    new RegExp(`^@${escapedName}\\b\\s*`, 'i'),
+    new RegExp(`^@${escapedId}\\b\\s*`, 'i'),
+  ]
+  let s = body.trimStart()
+  for (const p of patterns) {
+    if (p.test(s)) {
+      s = s.replace(p, '').trimStart()
+      break
+    }
+  }
+  return s
+}
+
+export type LastHumanTouchDetail = {
+  authorName: string
+  timeLabel: string
+  snippet: string
+}
+
+const LAST_HUMAN_SNIPPET_MAX = 240
+
+/**
+ * Latest human @mention of this agent: who, when, and message (mention stripped for readability).
+ */
+export function selectLastHumanTouchDetail(
   state: Pick<NaveStore, 'messages' | 'agents'>,
   agentId: string,
-): { authorName: string; preview: string } | null {
+): LastHumanTouchDetail | null {
+  const agent = state.agents[agentId]
+  if (!agent) return null
   const top = selectLatestHumanMentionMessage(state, agentId)
   if (!top) return null
   const body = humanMessageBody(top)
-  const preview = body.length > 90 ? `${body.slice(0, 87)}…` : body
-  return { authorName: top.authorName, preview }
+  const cleaned = stripLeadingSelfMention(body, agent)
+  const base = cleaned.length > 0 ? cleaned : body.trim()
+  const snippet =
+    base.length > LAST_HUMAN_SNIPPET_MAX
+      ? `${base.slice(0, LAST_HUMAN_SNIPPET_MAX - 1)}…`
+      : base
+  return {
+    authorName: top.authorName,
+    timeLabel: top.timestamp,
+    snippet,
+  }
 }
 
-/** Wall time + author from the latest human message that mentions this agent (matches feed truth). */
+/** Compact one-line summary: wall time + author. */
 export function selectLastHumanInteractionLabel(
   state: Pick<NaveStore, 'messages' | 'agents'>,
   agentId: string,
 ): string | null {
-  const top = selectLatestHumanMentionMessage(state, agentId)
-  if (!top) return null
-  return `${top.timestamp} from ${top.authorName}`
+  const d = selectLastHumanTouchDetail(state, agentId)
+  if (!d) return null
+  return `${d.timeLabel} · ${d.authorName}`
 }
 
 export type MissionPendingRow = {
