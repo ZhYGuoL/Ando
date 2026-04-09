@@ -14,10 +14,10 @@ import {
   formatRunningLabel,
   formatStoreElapsedMs,
   MISSION_AGENT_CARD_ORDER,
+  type LastHumanTouchDetail,
   selectCockpitMemoryMerged,
   selectCockpitTaskHistoryMerged,
-  selectLastHumanMentionForAgent,
-  selectLastHumanInteractionLabel,
+  selectLastHumanTouchDetail,
   selectMissionControlActivityFeed,
   selectMissionControlPendingRows,
   useNaveStore,
@@ -1224,10 +1224,10 @@ function HomeScreen({
                   const live = storeAgents[routeId]
                   if (!live) return null
                   const status = live.status
-                  const lastTouch = selectLastHumanMentionForAgent({ messages, agents: storeAgents }, routeId)
-                  const lastHumanLine = lastTouch
-                    ? `${lastTouch.authorName} · ${lastTouch.preview}`
-                    : '—'
+                  const lastHumanTouch = selectLastHumanTouchDetail(
+                    { messages, agents: storeAgents },
+                    routeId,
+                  )
                   const runningFor = formatRunningLabel(live.currentTask.startedAt)
                   const initials = cockpitInitials(live.id, live.name)
                   return (
@@ -1235,7 +1235,7 @@ function HomeScreen({
                       key={live.id}
                       type="button"
                       onClick={() => onOpenAgent(live.id)}
-                      className={`nave-float nave-rise rounded-[6px] border bg-white p-5 text-left ${
+                      className={`group nave-float nave-rise min-w-0 max-w-full rounded-[6px] border bg-white p-5 text-left ${
                         status === 'blocked'
                           ? 'border-[#d8b56a] hover:border-[#c4a85c]'
                           : 'border-[#d4d0c8] hover:border-[#8a8680]'
@@ -1249,33 +1249,54 @@ function HomeScreen({
                           #{live.channel}
                         </p>
                       </div>
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="flex items-start gap-3">
+                      <div className="flex min-w-0 items-start justify-between gap-3">
+                        <div className="flex min-w-0 items-start gap-3">
                           <Avatar
                             initials={initials}
                             status={status}
                             className={live.avatarClassName}
                           />
-                          <div>
-                            <p className="font-medium text-[#0f0f0f]">{live.name}</p>
-                            <p className="mt-1 text-[12px] text-[#5f5f5f]">{live.role}</p>
+                          <div className="min-w-0">
+                            <p className="break-words font-medium text-[#0f0f0f] [overflow-wrap:anywhere]">
+                              {live.name}
+                            </p>
+                            <p className="mt-1 break-words text-[12px] text-[#5f5f5f] [overflow-wrap:anywhere]">
+                              {live.role}
+                            </p>
                           </div>
                         </div>
                         <StatusPillDarkText status={status} />
                       </div>
 
-                      <p className="mt-4 text-[13px] leading-6 text-[#303030]">
+                      <p className="mt-4 min-w-0 break-words text-[13px] leading-6 text-[#303030] [overflow-wrap:anywhere]">
                         {live.currentTask.description}
                       </p>
 
-                      <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                        <HomeCardMeta
-                          label="Sub-processes"
-                          value={String(live.currentTask.subProcessCount)}
-                        />
-                        <HomeCardMeta label="Running" value={runningFor} />
-                        <HomeCardMeta label="Last human touch" value={lastHumanLine} />
-                        <HomeCardMeta label="View" value="Open cockpit" />
+                      <div className="mt-5 min-w-0 border-t border-[#e8e6e1] pt-4">
+                        <div className="flex flex-wrap items-baseline gap-x-8 gap-y-2">
+                          <div className="flex min-w-0 items-baseline gap-2">
+                            <span className="shrink-0 text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">
+                              Sub-processes
+                            </span>
+                            <span className="text-[15px] font-medium tabular-nums text-[#0f0f0f]">
+                              {live.currentTask.subProcessCount}
+                            </span>
+                          </div>
+                          <div className="flex min-w-0 items-baseline gap-2">
+                            <span className="shrink-0 text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">
+                              Running
+                            </span>
+                            <span className="text-[13px] font-medium text-[#0f0f0f]">{runningFor}</span>
+                          </div>
+                        </div>
+
+                        <div className="mt-4 min-w-0">
+                          <HomeCardLastHumanTouch detail={lastHumanTouch} />
+                        </div>
+
+                        <p className="mt-3 text-[12px] font-medium text-[#5f5f5f] transition-colors group-hover:text-[#002FA7]">
+                          Open cockpit →
+                        </p>
                       </div>
                     </button>
                   )
@@ -1440,9 +1461,8 @@ function AgentCockpitScreen({
     [messages, agents, permissionCardStates, agentId],
   )
 
-  const lastHumanLine = useMemo(
-    () =>
-      agentId ? selectLastHumanInteractionLabel({ messages, agents }, agentId) ?? '—' : '—',
+  const lastHumanTouch = useMemo(
+    () => (agentId ? selectLastHumanTouchDetail({ messages, agents }, agentId) : null),
     [messages, agents, agentId],
   )
 
@@ -1527,7 +1547,10 @@ function AgentCockpitScreen({
                 <IdentityRow label="Role" value={storeAgent.role} />
                 <IdentityRow label="Lives in" value={channelLabel} />
                 <IdentityRow label="Status" value={storeAgent.status} />
-                <IdentityRow label="Last human interaction" value={lastHumanLine} />
+                <IdentityRow
+                  label="Latest human message"
+                  value={<LastHumanTouchIdentity value={lastHumanTouch} />}
+                />
               </dl>
             </section>
           </div>
@@ -1853,11 +1876,44 @@ function MetricCard({ label, value }: { label: string; value: string }) {
   )
 }
 
-function HomeCardMeta({ label, value }: { label: string; value: string }) {
+function HomeCardLastHumanTouch({ detail }: { detail: LastHumanTouchDetail | null }) {
   return (
-    <div className="nave-surface rounded-[4px] border border-[#d4d0c8] px-3 py-3 hover:border-[#bfbab0]">
-      <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">{label}</p>
-      <p className="mt-2 text-[13px] leading-5 text-[#0f0f0f]">{value}</p>
+    <div className="min-w-0 max-w-full">
+      <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">Latest human message</p>
+      {detail ? (
+        <div className="mt-2 space-y-1.5">
+          <p className="text-[12px] leading-snug text-[#5f5f5f]">
+            <span className="font-medium text-[#0f0f0f]">{detail.authorName}</span>
+            <span className="text-[#b5b5b5]"> · </span>
+            <span className="tabular-nums tracking-tight text-[#6b6b6b]">{detail.timeLabel}</span>
+          </p>
+          <p className="line-clamp-3 min-w-0 break-words text-[13px] leading-relaxed text-[#303030] [overflow-wrap:anywhere]">
+            {detail.snippet}
+          </p>
+        </div>
+      ) : (
+        <p className="mt-2 text-[13px] leading-snug text-[#7d7d7d]">
+          No human messages to this agent in the feed yet.
+        </p>
+      )}
+    </div>
+  )
+}
+
+function LastHumanTouchIdentity({ value }: { value: LastHumanTouchDetail | null }) {
+  if (!value) {
+    return <span className="text-[#7d7d7d]">No human messages yet.</span>
+  }
+  return (
+    <div className="space-y-2">
+      <p className="text-[14px] leading-snug text-[#0f0f0f]">
+        <span className="font-medium">{value.authorName}</span>
+        <span className="text-[#9a9a9a]"> · </span>
+        <span className="tabular-nums text-[13px] text-[#5f5f5f]">{value.timeLabel}</span>
+      </p>
+      <p className="line-clamp-3 min-w-0 break-words text-[13px] leading-snug text-[#5f5f5f] [overflow-wrap:anywhere]">
+        {value.snippet}
+      </p>
     </div>
   )
 }
@@ -1891,7 +1947,7 @@ function DetailCard({
   )
 }
 
-function IdentityRow({ label, value }: { label: string; value: string }) {
+function IdentityRow({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="border-b border-[#d4d0c8] pb-3 last:border-b-0 last:pb-0">
       <dt className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">{label}</dt>
