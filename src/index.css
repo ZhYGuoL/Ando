@@ -19,9 +19,19 @@
   --nave-float-ease: cubic-bezier(0.16, 1, 0.35, 1);
   --nave-float-duration: 420ms;
   --nave-float-duration-short: 280ms;
-  --nave-drawer-duration: 420ms;
   --nave-float-lift: 2px;
   --nave-float-lift-dark: 1px;
+
+  /**
+   * Structural motion — Nave product voice: layout eases into its next shape.
+   * Cards, drawers, and panels settle; they do not snap shut. Micro-interactions
+   * above still use --nave-float-*; anything that changes height or major layout
+   * should use these tokens. (Permission cards read the same values in TS —
+   * keep durations aligned with NAVE_STRUCTURE_DURATION_MS.)
+   */
+  --nave-structure-ease: cubic-bezier(0.2, 1, 0.4, 1);
+  --nave-structure-duration: 720ms;
+  --nave-drawer-duration: var(--nave-structure-duration);
 
   /* Sidebar: warm ink (ties to shell #f5f4f0 — not flat #000) */
   --nave-sidebar-bg: #151311;
@@ -197,7 +207,7 @@ input {
 .workspace-header-drawer {
   display: grid;
   transition:
-    grid-template-rows var(--nave-drawer-duration) var(--nave-float-ease),
+    grid-template-rows var(--nave-structure-duration) var(--nave-structure-ease),
     opacity var(--nave-float-duration-short) ease-out;
 }
 
@@ -219,7 +229,7 @@ input {
 }
 
 .workspace-header-drawer-content {
-  transition: transform var(--nave-drawer-duration) var(--nave-float-ease);
+  transition: transform var(--nave-structure-duration) var(--nave-structure-ease);
 }
 
 .workspace-header-drawer.is-open .workspace-header-drawer-content {
@@ -230,13 +240,36 @@ input {
   transform: translateY(-12px);
 }
 
+/* ---- Collapse section (permission card, etc.) ---- */
+
+.nave-collapse-section {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transition:
+    grid-template-rows var(--nave-structure-duration) var(--nave-structure-ease),
+    opacity calc(var(--nave-structure-duration) * 0.45) ease-out;
+}
+
+.nave-collapse-section[data-collapsed] {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.nave-collapse-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .nave-float,
   .nave-rise,
   .nave-rise-dark,
   .nave-rise-static,
   .workspace-header-drawer,
-  .workspace-header-drawer-content {
+  .workspace-header-drawer-content,
+  .nave-collapse-section {
     transition: none !important;
     animation: none !important;
   }

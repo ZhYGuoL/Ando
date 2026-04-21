@@ -1,6 +1,11 @@
 import { create } from 'zustand'
 import type { PermissionCardState } from '../components/permission/PermissionCard'
 import type { CompletionCardState } from '../components/completion/CompletionCard'
+import {
+  PAPER_FRAME_SETTINGS_DEFERRED,
+  PAPER_MCP_SERVER_LABEL,
+  paperMcpTools,
+} from '../mcp/paperMcp'
 
 export type FeedMessageType = 'human' | 'agent' | 'system'
 
@@ -29,6 +34,8 @@ export type FeedSubprocessPayload = {
   name: string
   subtitle: string
   progressPct: number
+  /** Design track: transcript uses MCP-shaped steps; transport stub in `src/mcp/paperMcp.ts`. */
+  integration?: 'paper-mcp'
 }
 
 export type FeedMessage = {
@@ -45,7 +52,16 @@ export type FeedMessage = {
   permissionCard?: FeedPermissionPayload
   completionCard?: FeedCompletionPayload
   subprocess?: FeedSubprocessPayload
+  /** Multiple workers under one agent turn (coding + design, etc.). */
+  subprocesses?: FeedSubprocessPayload[]
   continuingLine?: boolean
+}
+
+/** Sub-process rows for feed rendering — prefers `subprocesses`, falls back to legacy `subprocess`. */
+export function feedMessageSubprocesses(msg: FeedMessage): FeedSubprocessPayload[] {
+  if (msg.subprocesses && msg.subprocesses.length > 0) return msg.subprocesses
+  if (msg.subprocess) return [msg.subprocess]
+  return []
 }
 
 export type SidebarAgentStatus = 'running' | 'idle' | 'blocked'
@@ -53,7 +69,7 @@ export type SidebarAgentStatus = 'running' | 'idle' | 'blocked'
 export type StoreSubprocessStatus = 'running' | 'completed' | 'killed' | 'failed'
 
 export type StoreSubprocessLogStep = {
-  type: 'read' | 'write' | 'analyze' | 'spawn'
+  type: 'read' | 'write' | 'analyze' | 'spawn' | 'mcp'
   description: string
   timestamp: string
 }
@@ -67,8 +83,13 @@ export type StoreSubProcess = {
   elapsedMs: number
   progress: number
   parentAgentId: string
-  log?: StoreSubprocessLogStep[]
+   log?: StoreSubprocessLogStep[]
+  /** Demo: index into `log` for the active milestone (-1 = not started). Bar % moves only when this advances. */
+  demoPlanStep?: number
+  /** Wall-clock ms of last milestone advance; used with variable gaps between steps. */
+  demoLastAdvanceWallMs?: number
   partialResult?: string
+  integration?: 'paper-mcp'
 }
 
 export type StoreCompletedTask = {
@@ -116,8 +137,24 @@ export type CockpitTaskHistoryRow = {
 
 export const FRONTEND_PERMISSION_MESSAGE_ID = 'msg-f-004'
 export const BACKEND_PERMISSION_MESSAGE_ID = 'msg-i-003'
+export const FRONTEND_COMPLETION_MESSAGE_ID = 'msg-f-completion'
+
+/** Composer identity for interactive demo (matches sidebar “Zhiyuan”). */
+export const DEMO_HUMAN_AUTHOR = { id: 'zhiyuan', name: 'Zhiyuan' } as const
+
+const FRONTEND_AGENT_ACK_MESSAGE_ID = 'msg-f-003'
 
 const REVIEW_DELAY_MS = 800
+
+function formatFeedClockFromIso(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '--:--'
+  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+function isoPlusMs(iso: string, ms: number): string {
+  return new Date(new Date(iso).getTime() + ms).toISOString()
+}
 
 export function formatStoreElapsedMs(ms: number): string {
   const totalSec = Math.max(0, Math.floor(ms / 1000))
@@ -535,109 +572,259 @@ export function selectMissionControlActivityFeed(state: MissionActivityFeedState
 
 export const MISSION_AGENT_CARD_ORDER = ['frontend', 'backend', 'data'] as const
 
-function seedAgents(): Record<string, StoreAgent> {
-  const t0 = '2026-04-02T09:44:00'
-  return {
-    frontend: {
-      id: 'frontend',
-      name: 'Patch',
-      role: 'repo worker',
-      channel: 'frontend',
-      status: 'blocked',
-      currentTask: {
-        description:
-          'Lazy-load the settings client chunk behind `settings.lazy_bundle` and remove synchronous settings imports from the bootstrap path.',
-        startedAt: t0,
-        subProcessCount: 1,
-      },
-      taskSummary:
-        'Tracing static imports from `main.tsx` through `SettingsHost`, posting graph updates in #frontend, and gating new file writes behind approval.',
-      identitySummary:
-        'Executes scoped file and queue work, inherits team policy, and surfaces approvals back to the lead thread.',
-      avatarClassName: 'bg-[#2a2a2a] text-[#f5f4f0]',
-      subProcesses: [
+const PATCH_SHARED_TASK_HISTORY: StoreCompletedTask[] = [
+  {
+    id: 'hist-fe-1',
+    description: 'Route leader approvals back to worker mailbox',
+    startedAt: '2026-04-02T08:12:00',
+    completedAt: '2026-04-02T08:15:12',
+    outcome: 'completed',
+    filesChanged: '4',
+    subProcessCount: 0,
+    approvalsNeeded: 0,
+  },
+  {
+    id: 'hist-fe-2',
+    description: 'Extract partial result from killed async run',
+    startedAt: '2026-04-02T07:20:00',
+    completedAt: '2026-04-02T07:27:41',
+    outcome: 'killed',
+    filesChanged: '2',
+    subProcessCount: 1,
+    approvalsNeeded: 0,
+  },
+  {
+    id: 'hist-fe-3',
+    description: 'Normalize stale session registry records',
+    startedAt: '2026-04-02T06:50:00',
+    completedAt: '2026-04-02T06:52:08',
+    outcome: 'failed',
+    filesChanged: '1',
+    subProcessCount: 0,
+    approvalsNeeded: 0,
+  },
+]
+
+function logTimesFromT0(t0: string, minuteOffsets: number[]): string[] {
+  return minuteOffsets.map((off) => formatFeedClockFromIso(isoPlusMs(t0, off * 60_000)))
+}
+
+function buildPatchSubProcesses(t0: string, runStartedWallMs: number): StoreSubProcess[] {
+  const c = logTimesFromT0(t0, [0, 1, 1, 2])
+  const p = logTimesFromT0(t0, [0, 0, 0, 1, 1, 1])
+  return [
+    {
+      id: 'proc-1',
+      name: 'Find what still loads Settings on the main path',
+      type: 'import trace',
+      status: 'running',
+      startedAt: t0,
+      elapsedMs: 6 * 60 * 1000 + 11 * 1000,
+      progress: 0,
+      demoPlanStep: -1,
+      demoLastAdvanceWallMs: runStartedWallMs,
+      parentAgentId: 'frontend',
+      log: [
         {
-          id: 'proc-1',
-          name: 'Trace static imports for settings on critical path',
-          type: 'import graph',
-          status: 'running',
-          startedAt: t0,
-          elapsedMs: 6 * 60 * 1000 + 11 * 1000,
-          progress: 62,
-          parentAgentId: 'frontend',
-          log: [
-            {
-              type: 'read',
-              description: 'Walked `main.tsx` → `router.tsx` → `app/providers.tsx` for static importers.',
-              timestamp: '09:44',
-            },
-            {
-              type: 'analyze',
-              description:
-                'Flagged `app/bootstrap/SettingsHost.tsx` as pinning `features/settings` synchronously.',
-              timestamp: '09:45',
-            },
-            {
-              type: 'read',
-              description: 'Read `SettingsHost` source to confirm `./settings-root` static import.',
-              timestamp: '09:45',
-            },
-            {
-              type: 'spawn',
-              description: 'Spawned checker to validate chunk graph against `settings.lazy_bundle`.',
-              timestamp: '09:46',
-            },
-          ],
+          type: 'read',
+          description: 'Walked bootstrap → router chain for anything that pulls Settings in early.',
+          timestamp: c[0]!,
+        },
+        {
+          type: 'analyze',
+          description: '`SettingsHost` still static-imports `./settings-root` — keeps Settings on the main chunk.',
+          timestamp: c[1]!,
+        },
+        {
+          type: 'read',
+          description: 'Opened `SettingsHost` to confirm the import line.',
+          timestamp: c[2]!,
+        },
+        {
+          type: 'spawn',
+          description: 'Checked graph against `settings.lazy_bundle` rollout rules.',
+          timestamp: c[3]!,
         },
       ],
-      taskHistory: [
-        {
-          id: 'hist-fe-1',
-          description: 'Route leader approvals back to worker mailbox',
-          startedAt: '2026-04-02T08:12:00',
-          completedAt: '2026-04-02T08:15:12',
-          outcome: 'completed',
-          filesChanged: '4',
-          subProcessCount: 0,
-          approvalsNeeded: 0,
-        },
-        {
-          id: 'hist-fe-2',
-          description: 'Extract partial result from killed async run',
-          startedAt: '2026-04-02T07:20:00',
-          completedAt: '2026-04-02T07:27:41',
-          outcome: 'killed',
-          filesChanged: '2',
-          subProcessCount: 1,
-          approvalsNeeded: 0,
-        },
-        {
-          id: 'hist-fe-3',
-          description: 'Normalize stale session registry records',
-          startedAt: '2026-04-02T06:50:00',
-          completedAt: '2026-04-02T06:52:08',
-          outcome: 'failed',
-          filesChanged: '1',
-          subProcessCount: 0,
-          approvalsNeeded: 0,
-        },
-      ],
-      memory: {
-        recentDecisions: [
-          'Switched to the flagged dynamic-import path after Maya’s thread emphasized keeping `AppRoot.tsx` untouched until the graph is posted.',
-          'Spawned the static import graph sub-process before proposing `lazy-registry.ts` writes.',
-        ],
-        openThreads: [
-          'Mobile breakpoint testing not yet verified for the deferred settings chunk.',
-          'Token refresh on expired sessions still flagged for follow-up — out of scope for this bundle cut.',
-        ],
-        constraints: [
-          'Never store tokens in localStorage.',
-          'Always map `features/settings` importers before mutating `SettingsHost` or bootstrap.',
-          'Post the full importer list in-thread before gated writes.',
-        ],
-      },
     },
+    {
+      id: 'proc-paper-mcp',
+      name: `Paper frame · ${PAPER_FRAME_SETTINGS_DEFERRED}`,
+      type: PAPER_MCP_SERVER_LABEL,
+      status: 'running',
+      startedAt: t0,
+      elapsedMs: 5 * 60 * 1000 + 3 * 1000,
+      progress: 0,
+      demoPlanStep: -1,
+      demoLastAdvanceWallMs: runStartedWallMs,
+      parentAgentId: 'frontend',
+      integration: 'paper-mcp',
+      log: [
+        {
+          type: 'mcp',
+          description: `Initialized ${PAPER_MCP_SERVER_LABEL} session · workspace token scoped.`,
+          timestamp: p[0]!,
+        },
+        {
+          type: 'mcp',
+          description: `tools/list → ${paperMcpTools.listFrames}, ${paperMcpTools.getFrame}, ${paperMcpTools.fetchComments}`,
+          timestamp: p[1]!,
+        },
+        {
+          type: 'mcp',
+          description: `tools/call ${paperMcpTools.listFrames} · project nave-app`,
+          timestamp: p[2]!,
+        },
+        {
+          type: 'mcp',
+          description: `tools/call ${paperMcpTools.getFrame} · frame ${PAPER_FRAME_SETTINGS_DEFERRED}`,
+          timestamp: p[3]!,
+        },
+        {
+          type: 'analyze',
+          description:
+            'Compared Paper frame to Nave shell density; noted one tight breakpoint on the settings shell hero.',
+          timestamp: p[4]!,
+        },
+        {
+          type: 'mcp',
+          description: `tools/call ${paperMcpTools.fetchComments} · latest thread on the frame`,
+          timestamp: p[5]!,
+        },
+      ],
+    },
+  ]
+}
+
+function buildPatchDiscussionAgent(): StoreAgent {
+  const tIdle = '2026-04-02T09:40:00'
+  return {
+    id: 'frontend',
+    name: 'Patch',
+    role: 'repo worker',
+    channel: 'frontend',
+    status: 'idle',
+    currentTask: {
+      description:
+        'Idle in #frontend until a human @mentions Patch with scope for the Settings lazy-load work.',
+      startedAt: tIdle,
+      subProcessCount: 0,
+    },
+    taskSummary:
+      'Humans are aligning on the flag (`settings.lazy_bundle`) and the Paper settings shell before anyone tags Patch.',
+    identitySummary:
+      'Executes scoped file and queue work, inherits team policy, and surfaces approvals back to the lead thread.',
+    avatarClassName: 'bg-[#2a2a2a] text-[#f5f4f0]',
+    subProcesses: [],
+    taskHistory: PATCH_SHARED_TASK_HISTORY,
+    memory: {
+      recentDecisions: [
+        'Holding automation until a human tags Patch — keeps the pre-alignment thread human-led.',
+      ],
+      openThreads: [
+        'Import list must land in-channel before bootstrap edits.',
+        'Paper frame `settings-deferred-shell` is the layout source of truth.',
+      ],
+      constraints: [
+        'Never store tokens in localStorage.',
+        'Map Settings importers before changing `SettingsHost` or bootstrap.',
+        'Post the importer list in-thread before gated writes.',
+      ],
+    },
+  }
+}
+
+function buildPatchActiveAgent(t0: string, runStartedWallMs: number): StoreAgent {
+  const idle = buildPatchDiscussionAgent()
+  return {
+    ...idle,
+    status: 'blocked',
+    currentTask: {
+      description:
+        'Defer Settings until open: trace eager imports, pull latest Paper notes on `settings-deferred-shell`, then ask before editing `SettingsHost`.',
+      startedAt: t0,
+      subProcessCount: 2,
+    },
+    taskSummary:
+      'Import-trace sub-process plus Paper MCP pass so code matches the agreed shell before any approval.',
+    subProcesses: buildPatchSubProcesses(t0, runStartedWallMs),
+    memory: {
+      ...idle.memory,
+      recentDecisions: [
+        'Keeping `AppRoot.tsx` quiet until the import list is posted, per thread.',
+        'Paper MCP sub-process runs beside the trace so layout notes stay in one run.',
+      ],
+      openThreads: [
+        'Double-check narrow-width behavior on the settings shell before ship.',
+        'Session refresh edge cases stay out of this cut.',
+      ],
+    },
+  }
+}
+
+function patchActivationAckMessage(iso: string): FeedMessage {
+  return {
+    id: FRONTEND_AGENT_ACK_MESSAGE_ID,
+    channelId: 'frontend',
+    type: 'agent',
+    authorId: 'frontend',
+    authorName: 'Patch',
+    timestamp: formatFeedClockFromIso(iso),
+    timestampDateTime: iso,
+    paragraphs: [
+      'On it. Two sub-processes: trace what still loads Settings eagerly, and Paper MCP for the `settings-deferred-shell` frame. I will post findings here.',
+    ],
+    continuingLine: true,
+    subprocesses: [
+      {
+        routeId: 'proc-1',
+        name: 'Find what still loads Settings on the main path',
+        subtitle: 'coding · import trace',
+        progressPct: 0,
+      },
+      {
+        routeId: 'proc-paper-mcp',
+        name: `Paper frame · ${PAPER_FRAME_SETTINGS_DEFERRED}`,
+        subtitle: `design · ${PAPER_MCP_SERVER_LABEL}`,
+        progressPct: 0,
+        integration: 'paper-mcp',
+      },
+    ],
+  }
+}
+
+function patchActivationPermissionMessage(iso: string): FeedMessage {
+  return {
+    id: FRONTEND_PERMISSION_MESSAGE_ID,
+    channelId: 'frontend',
+    type: 'agent',
+    authorId: 'frontend',
+    authorName: 'Patch',
+    timestamp: formatFeedClockFromIso(iso),
+    timestampDateTime: iso,
+    paragraphs: [
+      'Trace is clear: `SettingsHost` still static-imports `./settings-root`, so Settings ships with the first chunk. Paper matches the shell we want. I need approval to add `src/features/settings/lazy-registry.ts` and switch `SettingsHost` to a dynamic import behind `settings.lazy_bundle`.',
+    ],
+    continuingLine: true,
+    permissionCard: {
+      actionTitle:
+        'Add `lazy-registry.ts` and lazy-load Settings from `SettingsHost` (flagged)',
+      resource: 'src/features/settings/lazy-registry.ts',
+      description:
+        'Adds the registry file and updates `SettingsHost` to replace the static `./settings-root` import with a dynamic `import()` behind `settings.lazy_bundle`. Chunk boundaries only—no secrets or env.',
+      policyAgentName: 'Patch',
+      policyPathGlob: 'src/features/settings/**',
+    },
+  }
+}
+
+function buildPatchActivationFeedMessages(ackIso: string, permIso: string): FeedMessage[] {
+  return [patchActivationAckMessage(ackIso), patchActivationPermissionMessage(permIso)]
+}
+
+function seedAgents(): Record<string, StoreAgent> {
+  return {
+    frontend: buildPatchDiscussionAgent(),
     backend: {
       id: 'backend',
       name: 'Scout',
@@ -748,68 +935,48 @@ function seedAgents(): Record<string, StoreAgent> {
   }
 }
 
+/** Human-only preamble: no @Patch — the demo waits for the viewer to tag Patch from the composer. */
 function seedFrontendMessages(): FeedMessage[] {
   return [
     {
-      id: 'msg-f-001',
+      id: 'msg-f-d1',
       channelId: 'frontend',
       type: 'human',
       authorId: 'maya',
       authorName: 'Maya Lin',
-      timestamp: '09:41',
-      timestampDateTime: '2026-04-02T09:41:00',
-      text: '@Patch we need the settings surface lazy-loaded from `src/features/settings/lazy-registry.ts` behind `settings.lazy_bundle` before Thursday’s cut. Trace every static import that still pulls `features/settings` into the critical path of `main.tsx` and report before you touch files.',
+      timestamp: '09:32',
+      timestampDateTime: '2026-04-02T09:32:00',
+      text: "Settings is still in the initial bundle, which is rough for first paint if a lot of people never open it. Can we lazy-load behind `settings.lazy_bundle`, or is there a constraint I'm missing?",
     },
     {
-      id: 'msg-f-002',
+      id: 'msg-f-d2',
       channelId: 'frontend',
       type: 'human',
       authorId: 'jon',
       authorName: 'Jon Park',
-      timestamp: '09:43',
-      timestampDateTime: '2026-04-02T09:43:00',
-      text: 'Flag already exists in GrowthBook. If you have to touch `AppRoot.tsx`, keep the diff under ~35 lines and post the import list first.',
+      timestamp: '09:33',
+      timestampDateTime: '2026-04-02T09:33:00',
+      text: "Let's align to the Paper frame (`settings-deferred-shell`). Last time we improvised in code and design ended up with a mismatch.",
     },
     {
-      id: 'msg-f-003',
+      id: 'msg-f-d3',
       channelId: 'frontend',
-      type: 'agent',
-      authorId: 'frontend',
-      authorName: 'Patch',
-      timestamp: '09:44',
-      timestampDateTime: '2026-04-02T09:44:00',
-      paragraphs: [
-        'Acknowledged. I spawned a sub-process that walks `main.tsx` → `router.tsx` → `app/providers.tsx` and records every importer that resolves `features/settings` synchronously. I will keep graph updates in this thread so the feed stays readable.',
-      ],
-      continuingLine: true,
-      subprocess: {
-        routeId: 'proc-1',
-        name: 'Trace static imports for settings on critical path',
-        subtitle: 'running · opens detail view',
-        progressPct: 62,
-      },
+      type: 'human',
+      authorId: 'maya',
+      authorName: 'Maya Lin',
+      timestamp: '09:34',
+      timestampDateTime: '2026-04-02T09:34:00',
+      text: "Works for me. Let's hold off on SettingsHost until we post who still imports settings in this thread.",
     },
     {
-      id: FRONTEND_PERMISSION_MESSAGE_ID,
+      id: 'msg-f-d4',
       channelId: 'frontend',
-      type: 'agent',
-      authorId: 'frontend',
-      authorName: 'Patch',
-      timestamp: '09:47',
-      timestampDateTime: '2026-04-02T09:47:00',
-      paragraphs: [
-        'The graph shows `app/bootstrap/SettingsHost.tsx` still synchronously imports `./settings-root`, which pins the bundle. I need approval to add `src/features/settings/lazy-registry.ts` and switch `SettingsHost` to load it through the flagged dynamic import path described in the team doc.',
-      ],
-      continuingLine: true,
-      permissionCard: {
-        actionTitle:
-          'Add `lazy-registry.ts` and change SettingsHost to use a flagged dynamic import',
-        resource: 'src/features/settings/lazy-registry.ts',
-        description:
-          'Creates the registry module and updates `src/app/bootstrap/SettingsHost.tsx` to replace the static import of `./settings-root` with `import(settingsPath)` guarded by `settings.lazy_bundle`. No secrets or env values are touched; this only affects client chunk boundaries.',
-        policyAgentName: 'Patch',
-        policyPathGlob: 'src/features/settings/**',
-      },
+      type: 'human',
+      authorId: 'jon',
+      authorName: 'Jon Park',
+      timestamp: '09:35',
+      timestampDateTime: '2026-04-02T09:35:00',
+      text: "Once that list is here, whoever is driving can pull the repo worker in from this channel. I'd rather keep the trace, Paper pass, and approvals in one place.",
     },
   ]
 }
@@ -824,7 +991,7 @@ function seedInfraMessages(): FeedMessage[] {
       authorName: 'Jon Park',
       timestamp: '08:41',
       timestampDateTime: '2026-04-02T08:41:00',
-      text: '@Scout tighten `src/queue/permission-sync.ts` handoff rules before today’s inspection run — stage the queue diff only until a human approves the on-disk write.',
+      text: '@Scout could you tighten the permission-sync handoff before the inspection run today? Staging the queue diff is fine—please do not land the file until a human signs off.',
     },
     {
       id: 'msg-i-002',
@@ -873,7 +1040,7 @@ function seedReleaseTrainMessages(): FeedMessage[] {
       authorName: 'Elise Tran',
       timestamp: '09:02',
       timestampDateTime: '2026-04-02T09:02:00',
-      text: '@Mux poll the bridge again after the credential rotation dry-run; hold new sessions until the registry export lands.',
+      text: '@Mux could you poll the bridge again after the credential rotation dry-run? Please hold new sessions until the registry export lands.',
     },
   ]
 }
@@ -884,7 +1051,7 @@ function seedAllMessages(): FeedMessage[] {
 
 function completionMessage(): FeedMessage {
   return {
-    id: 'msg-f-completion',
+    id: FRONTEND_COMPLETION_MESSAGE_ID,
     channelId: 'frontend',
     type: 'agent',
     authorId: 'frontend',
@@ -892,15 +1059,15 @@ function completionMessage(): FeedMessage {
     timestamp: '09:48',
     timestampDateTime: '2026-04-02T09:48:00',
     paragraphs: [
-      'Approval received. `lazy-registry.ts` is in place, `SettingsHost` now gates the client chunk behind `settings.lazy_bundle`, and the sub-process run shows no remaining synchronous importers on the hot path. Ready for review in CI.',
+      'Approval received. `lazy-registry.ts` is in, `SettingsHost` loads Settings behind `settings.lazy_bundle`, and the trace is clean. Paper notes for `settings-deferred-shell` are reflected in the PR. Ready for CI.',
     ],
     completionCard: {
       state: 'completed',
-      taskName: 'Lazy-load settings bundle behind feature flag',
+      taskName: 'Load Settings on demand (flagged)',
       stats: {
         durationLabel: 'Completed · 4m 06s',
         files: '3',
-        subprocesses: '1',
+        subprocesses: '2',
         errors: '0',
         approvals: '1',
       },
@@ -918,8 +1085,8 @@ function denialFollowUpMessage(): FeedMessage {
     timestamp: '09:49',
     timestampDateTime: '2026-04-02T09:49:00',
     paragraphs: [
-      'Understood. I will not add `lazy-registry.ts` in this pass.',
-      'I will instead refactor `SettingsHost` to use an inline `import()` of the existing `./settings-root` path behind `settings.lazy_bundle`, keep `AppRoot.tsx` untouched, and re-run the import graph. I will post the updated trace before the next write.',
+      'Understood—no `lazy-registry.ts` this pass.',
+      'I will try an inline `import()` on `./settings-root` behind `settings.lazy_bundle`, leave `AppRoot.tsx` alone, re-run the trace, and post results before the next write.',
     ],
   }
 }
@@ -930,18 +1097,103 @@ export type NaveStore = {
   agents: Record<string, StoreAgent>
   lastViewedProcessId: string | null
   activeChannel: string
+  /**
+   * When true, #frontend waits for the viewer to send a message that @mentions Patch before
+   * agent sub-processes and the permission card appear.
+   */
+  frontendDemoAwaitingAssignment: boolean
+  /**
+   * True from Patch activation until the delayed ack message is appended — drives a feed skeleton
+   * so the channel does not feel idle during PATCH_ACK_DELAY_MS.
+   */
+  frontendPatchAckPending: boolean
   setActiveChannel: (channelId: string) => void
   setLastViewedProcessId: (processId: string | null) => void
+  /** Append a human line; may activate Patch on #frontend when awaiting assignment and text mentions Patch. */
+  sendChannelMessage: (channelId: string, text: string) => void
   permissionApprove: (messageId: string) => void
   permissionDeny: (messageId: string) => void
   permissionAlwaysAllow: (messageId: string) => void
   permissionAlwaysAllowConfirm: (messageId: string) => void
   permissionAlwaysAllowCancel: (messageId: string) => void
+  /** Restore seeded demo state for repeat recording takes. */
+  demoReset: () => void
+  /**
+   * Demo tick: advance running Patch sub-process progress toward completion so feed and cockpit
+   * bars move without a live backend. No-op when nothing is running.
+   */
+  advanceDemoSubprocessProgress: () => void
 }
 
 function appendCompletionIfMissing(list: FeedMessage[]): FeedMessage[] {
-  if (list.some((m) => m.id === 'msg-f-completion')) return list
+  if (list.some((m) => m.id === FRONTEND_COMPLETION_MESSAGE_ID)) return list
   return [...list, completionMessage()]
+}
+
+export type WorkspaceCompletionBanner = {
+  taskName: string
+  filesLabel: string
+  durationSnippet: string
+}
+
+/** Latest Patch completion in #frontend — drives the IKB workspace banner (third completion signal). */
+export function selectLatestFrontendCompletionBanner(
+  state: Pick<NaveStore, 'messages'>,
+): WorkspaceCompletionBanner | null {
+  const hits = state.messages.filter(
+    (m) =>
+      m.channelId === 'frontend' &&
+      m.authorId === 'frontend' &&
+      m.completionCard?.state === 'completed',
+  )
+  const top = hits.sort((a, b) => missionTs(b.timestampDateTime) - missionTs(a.timestampDateTime))[0]
+  if (!top?.completionCard) return null
+  const c = top.completionCard
+  const durationSnippet =
+    c.stats.durationLabel.replace(/^\s*Completed\s*·\s*/i, '').trim() || c.stats.durationLabel
+  return {
+    taskName: c.taskName,
+    filesLabel: `${c.stats.files} files`,
+    durationSnippet,
+  }
+}
+
+export function selectWorkspaceHeaderMetrics(
+  state: Pick<NaveStore, 'agents' | 'messages' | 'permissionCardStates'>,
+): { subProcesses: string; pendingApprovals: string; queuePriority: string } {
+  const subTotal = Object.values(state.agents).reduce(
+    (acc, a) => acc + a.currentTask.subProcessCount,
+    0,
+  )
+  const pending = selectMissionControlPendingRows(state).length
+  return {
+    subProcesses: String(subTotal).padStart(2, '0'),
+    pendingApprovals: String(pending).padStart(2, '0'),
+    queuePriority: 'Now',
+  }
+}
+
+function initialDataSlice(): Pick<
+  NaveStore,
+  | 'messages'
+  | 'permissionCardStates'
+  | 'agents'
+  | 'lastViewedProcessId'
+  | 'activeChannel'
+  | 'frontendDemoAwaitingAssignment'
+  | 'frontendPatchAckPending'
+> {
+  return {
+    messages: seedAllMessages(),
+    permissionCardStates: {
+      [BACKEND_PERMISSION_MESSAGE_ID]: 'pending',
+    },
+    agents: seedAgents(),
+    lastViewedProcessId: null,
+    activeChannel: 'frontend',
+    frontendDemoAwaitingAssignment: true,
+    frontendPatchAckPending: false,
+  }
 }
 
 function applyFrontendPostApproval(get: () => NaveStore) {
@@ -950,8 +1202,14 @@ function applyFrontendPostApproval(get: () => NaveStore) {
   if (!fe) return { agents, messages: appendCompletionIfMissing(messages) }
 
   const nextSub = fe.subProcesses.map((s) =>
-    s.id === 'proc-1'
-      ? { ...s, status: 'completed' as const, progress: 100, elapsedMs: s.elapsedMs }
+    s.status === 'running'
+      ? {
+          ...s,
+          status: 'completed' as const,
+          progress: 100,
+          demoPlanStep: Math.max(0, (s.log?.length ?? 1) - 1),
+          elapsedMs: s.elapsedMs,
+        }
       : s,
   )
 
@@ -1036,7 +1294,62 @@ function permissionOutcomePatch(
   return {}
 }
 
+/**
+ * Poll interval for demo sub-process checks. Each milestone uses a variable wall-clock gap
+ * (`demoStepGapMs`) so runs feel uneven, not metronomic.
+ */
+export const DEMO_SUBPROCESS_POLL_MS = 175
+
+const PATCH_ACK_DELAY_MS = 1_050
+const PATCH_PERMISSION_DELAY_MS = 2_900
+
+function demoStepGapMs(s: StoreSubProcess): number {
+  const stepIdxForGap = Math.max(0, (s.demoPlanStep ?? -1) + 1)
+  const lane = s.id === 'proc-paper-mcp' ? 1 : 0
+  const tail = s.id.charCodeAt(s.id.length - 1) | 0
+  const jitter = (stepIdxForGap * 113 + lane * 79 + tail) % 520
+  return 380 + jitter
+}
+
+/**
+ * Advance one milestone when wall-clock gap since `demoLastAdvanceWallMs` has elapsed.
+ */
+function maybeAdvanceDemoSubProcess(s: StoreSubProcess, now: number): StoreSubProcess {
+  if (s.status !== 'running') return s
+  const planLen = Math.max(1, s.log?.length ?? 1)
+  const last = s.demoLastAdvanceWallMs ?? now
+  const gap = demoStepGapMs(s)
+  if (now - last < gap) {
+    return s
+  }
+  const elapsedDelta = Math.min(Math.max(0, now - last), 45_000)
+  const cur = s.demoPlanStep ?? -1
+  const next = cur + 1
+  if (next >= planLen) {
+    return {
+      ...s,
+      demoPlanStep: Math.max(0, planLen - 1),
+      progress: 100,
+      status: 'completed',
+      elapsedMs: s.elapsedMs + elapsedDelta,
+      demoLastAdvanceWallMs: now,
+    }
+  }
+  const progress = Math.round((100 * (next + 1)) / planLen)
+  const done = progress >= 100
+  return {
+    ...s,
+    demoPlanStep: next,
+    progress: done ? 100 : progress,
+    status: done ? ('completed' as const) : ('running' as const),
+    elapsedMs: s.elapsedMs + elapsedDelta,
+    demoLastAdvanceWallMs: now,
+  }
+}
+
 export const useNaveStore = create<NaveStore>((set, get) => {
+  let patchActivationTimelineSeq = 0
+
   const queueReviewFinish = (messageId: string, outcome: 'approved' | 'denied') => {
     window.setTimeout(() => {
       const { permissionCardStates } = get()
@@ -1053,18 +1366,85 @@ export const useNaveStore = create<NaveStore>((set, get) => {
   }
 
   return {
-    messages: seedAllMessages(),
-    permissionCardStates: {
-      [FRONTEND_PERMISSION_MESSAGE_ID]: 'pending',
-      [BACKEND_PERMISSION_MESSAGE_ID]: 'pending',
-    },
-    agents: seedAgents(),
-    lastViewedProcessId: null,
-    activeChannel: 'frontend',
+    ...initialDataSlice(),
 
     setActiveChannel: (channelId) => set({ activeChannel: channelId }),
 
     setLastViewedProcessId: (processId) => set({ lastViewedProcessId: processId }),
+
+    sendChannelMessage: (channelId, text) => {
+      const trimmed = text.trim()
+      if (!trimmed) return
+      const state = get()
+      const now = new Date()
+      const iso = now.toISOString()
+      const display = formatFeedClockFromIso(iso)
+      const userMsgId = `msg-human-${channelId}-${now.getTime()}`
+      const humanMsg: FeedMessage = {
+        id: userMsgId,
+        channelId,
+        type: 'human',
+        authorId: DEMO_HUMAN_AUTHOR.id,
+        authorName: DEMO_HUMAN_AUTHOR.name,
+        timestamp: display,
+        timestampDateTime: iso,
+        text: trimmed,
+      }
+      const nextMessages = [...state.messages, humanMsg]
+      const feAgent = state.agents.frontend
+
+      if (
+        channelId === 'frontend' &&
+        state.frontendDemoAwaitingAssignment &&
+        feAgent &&
+        messageMentionsAgent(trimmed, feAgent)
+      ) {
+        const taskStartIso = iso
+        patchActivationTimelineSeq++
+        const timelineSeq = patchActivationTimelineSeq
+
+        set({
+          messages: nextMessages,
+          frontendDemoAwaitingAssignment: false,
+          frontendPatchAckPending: true,
+        })
+
+        window.setTimeout(() => {
+          if (timelineSeq !== patchActivationTimelineSeq) return
+          const wall = Date.now()
+          const ackIso = new Date().toISOString()
+          set((s) => {
+            if (timelineSeq !== patchActivationTimelineSeq) return {}
+            return {
+              messages: [...s.messages, patchActivationAckMessage(ackIso)],
+              agents: {
+                ...s.agents,
+                frontend: buildPatchActiveAgent(taskStartIso, wall),
+              },
+              frontendPatchAckPending: false,
+            }
+          })
+        }, PATCH_ACK_DELAY_MS)
+
+        window.setTimeout(() => {
+          if (timelineSeq !== patchActivationTimelineSeq) return
+          const permIso = new Date().toISOString()
+          set((s) => {
+            if (timelineSeq !== patchActivationTimelineSeq) return {}
+            return {
+              messages: [...s.messages, patchActivationPermissionMessage(permIso)],
+              permissionCardStates: {
+                ...s.permissionCardStates,
+                [FRONTEND_PERMISSION_MESSAGE_ID]: 'pending',
+              },
+            }
+          })
+        }, PATCH_ACK_DELAY_MS + PATCH_PERMISSION_DELAY_MS)
+        return
+      }
+
+      set({ messages: nextMessages })
+    },
 
     permissionApprove: (messageId) => {
       const { permissionCardStates } = get()
@@ -1118,6 +1498,43 @@ export const useNaveStore = create<NaveStore>((set, get) => {
       if (permissionCardStates[messageId] !== 'always-allowed-confirming') return
       set({
         permissionCardStates: { ...permissionCardStates, [messageId]: 'pending' },
+      })
+    },
+
+    demoReset: () => {
+      patchActivationTimelineSeq++
+      set(initialDataSlice())
+    },
+
+    advanceDemoSubprocessProgress: () => {
+      const now = Date.now()
+      set((state) => {
+        const fe = state.agents.frontend
+        if (!fe) return {}
+        let changed = false
+        const nextSubs = fe.subProcesses.map((s) => {
+          const next = maybeAdvanceDemoSubProcess(s, now)
+          if (
+            next.progress !== s.progress ||
+            next.status !== s.status ||
+            next.demoPlanStep !== s.demoPlanStep ||
+            next.demoLastAdvanceWallMs !== s.demoLastAdvanceWallMs ||
+            next.elapsedMs !== s.elapsedMs
+          ) {
+            changed = true
+          }
+          return next
+        })
+        if (!changed) return {}
+        return {
+          agents: {
+            ...state.agents,
+            frontend: {
+              ...fe,
+              subProcesses: nextSubs,
+            },
+          },
+        }
       })
     },
   }

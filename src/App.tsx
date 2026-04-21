@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
 import { CompletionCard } from './components/completion/CompletionCard'
 import { MockFeedMessage } from './components/permission/MockFeedMessage'
 import {
@@ -6,8 +14,11 @@ import {
   type PermissionCardInteractionHandlers,
   type PermissionCardState,
 } from './components/permission/PermissionCard'
+import { DemoControls } from './components/demo/DemoControls'
 import {
   type FeedMessage,
+  type FeedSubprocessPayload,
+  feedMessageSubprocesses,
   type MissionFeedEvent,
   type StoreAgent,
   type StoreSubProcess,
@@ -18,9 +29,14 @@ import {
   selectCockpitMemoryMerged,
   selectCockpitTaskHistoryMerged,
   selectLastHumanTouchDetail,
+  selectLatestFrontendCompletionBanner,
   selectMissionControlActivityFeed,
   selectMissionControlPendingRows,
+  selectWorkspaceHeaderMetrics,
   useNaveStore,
+  DEMO_HUMAN_AUTHOR,
+  DEMO_SUBPROCESS_POLL_MS,
+  type StoreSubprocessStatus,
 } from './store'
 import {
   MemoryRouter,
@@ -37,7 +53,7 @@ import { NavStackProvider, useNavStack } from './nav/NavStackContext'
 
 type AgentStatus = 'running' | 'blocked' | 'idle'
 type ProcessStatus = 'running' | 'completed' | 'killed' | 'failed' | 'blocked' | 'idle'
-type SubprocessStepType = 'read' | 'write' | 'analyze' | 'spawn'
+type SubprocessStepType = 'read' | 'write' | 'analyze' | 'spawn' | 'mcp'
 type ActivityKind = 'completion' | 'permission' | 'state' | 'task'
 
 type Channel = {
@@ -77,6 +93,7 @@ type Agent = {
       description: string
       timestamp: string
     }[]
+    integration?: 'paper-mcp'
   }[]
   taskHistory: {
     name: string
@@ -92,12 +109,6 @@ const channels: Channel[] = [
   { name: 'infra', unread: false },
   { name: 'release-train', unread: false },
   { name: 'memory-lab', unread: false },
-]
-
-const workspaceMetrics = [
-  { label: 'Sub-processes', value: '03' },
-  { label: 'Pending approvals', value: '01' },
-  { label: 'Queue priority', value: 'Now' },
 ]
 
 const channelSummaries: Record<string, string> = {
@@ -178,6 +189,7 @@ function storeSubToLegacy(sub: StoreSubProcess): Agent['subprocesses'][number] {
     elapsed: formatStoreElapsedMs(sub.elapsedMs),
     progress: sub.progress,
     partialResult: sub.partialResult,
+    integration: sub.integration,
     log: (sub.log ?? []).map((l) => ({ ...l })),
   }
 }
@@ -201,12 +213,63 @@ export function AppShell() {
   )
 }
 
+function feedSubprocessLiveView(
+  sub: FeedSubprocessPayload,
+  agent: StoreAgent | undefined,
+): {
+  pct: number
+  status: StoreSubprocessStatus
+  phaseLabel: string | null
+  planMeta: string | null
+  milestoneCount: number | null
+} {
+  const live = agent?.subProcesses.find((p) => p.id === sub.routeId)
+  const pct = live != null ? Math.min(100, live.progress) : sub.progressPct
+  const status: StoreSubprocessStatus =
+    live != null ? live.status : pct >= 100 ? 'completed' : 'running'
+  const phaseLabel = live ? subprocessPhaseLabelFromPlan(live) : null
+  const planMeta = live ? subprocessPlanMetaLine(live, status) : null
+  const milestoneCount = live?.log?.length ? live.log.length : null
+  return { pct, status, phaseLabel, planMeta, milestoneCount }
+}
+
+/** Active milestone copy — always matches `demoPlanStep` while running (hidden once terminal). */
+function subprocessPhaseLabelFromPlan(proc: StoreSubProcess): string | null {
+  const steps = proc.log
+  if (!steps?.length) return null
+  if (proc.status !== 'running') return null
+  const idx = proc.demoPlanStep ?? -1
+  if (idx < 0) return `Next · ${steps[0]!.description}`
+  return steps[idx]!.description
+}
+
+function subprocessPlanMetaLine(proc: StoreSubProcess, status: StoreSubprocessStatus): string | null {
+  const n = proc.log?.length ?? 0
+  if (!n || status !== 'running') return null
+  const idx = proc.demoPlanStep ?? -1
+  if (idx < 0) return `Run log · ${n} milestones`
+  return `Milestone ${idx + 1} of ${n}`
+}
+
+function truncateFeedPhase(s: string, max = 100): string {
+  const t = s.trim()
+  if (t.length <= max) return t
+  return `${t.slice(0, max - 1)}…`
+}
+
 function AppLayout() {
   const location = useLocation()
   const navigate = useNavigate()
   const { clearStack } = useNavStack()
   const setActiveChannel = useNaveStore((s) => s.setActiveChannel)
   const storeAgents = useNaveStore((s) => s.agents)
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      useNaveStore.getState().advanceDemoSubprocessProgress()
+    }, DEMO_SUBPROCESS_POLL_MS)
+    return () => clearInterval(id)
+  }, [])
 
   const channelFromSearch = new URLSearchParams(location.search).get('channel') ?? 'frontend'
   const processCtx =
@@ -246,9 +309,10 @@ function AppLayout() {
 
   const [channelsCollapsed, setChannelsCollapsed] = useState(false)
   const [agentsCollapsed, setAgentsCollapsed] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
 
   return (
-    <div className="h-screen overflow-hidden bg-[#f5f4f0] text-[14px] text-[#0f0f0f] antialiased">
+    <div className="h-screen overflow-hidden bg-[#f5f4f0] text-[13px] text-[#0f0f0f] antialiased">
       <div className="flex h-full min-h-0 overflow-hidden">
         <Sidebar
           channels={channels}
@@ -257,13 +321,16 @@ function AppLayout() {
           homeActive={location.pathname === '/home'}
           channelsCollapsed={channelsCollapsed}
           agentsCollapsed={agentsCollapsed}
+          sidebarCollapsed={sidebarCollapsed}
           onToggleChannels={() => setChannelsCollapsed((current) => !current)}
           onToggleAgents={() => setAgentsCollapsed((current) => !current)}
+          onToggleSidebar={() => setSidebarCollapsed((current) => !current)}
           onOpenHome={goHome}
           onSelectChannel={goWorkspace}
           onSelectAgent={goAgentFromSidebar}
         />
         <Outlet />
+        <DemoControls />
       </div>
     </div>
   )
@@ -499,6 +566,204 @@ function humanInitials(name: string) {
   return (parts[0]![0]! + parts[parts.length - 1]![0]!).toUpperCase()
 }
 
+/** Speaker cue: avatar + name hue only — no blocks (feeds stay flat on channel paper). */
+function humanLaneForAuthor(authorId: string): {
+  avatarBg: string
+  avatarText: string
+  name: string
+} {
+  switch (authorId) {
+    case 'maya':
+      return {
+        avatarBg: 'bg-[#ede4d8]',
+        avatarText: 'text-[#4a3428]',
+        name: 'text-[#5c3d2e]',
+      }
+    case 'jon':
+      return {
+        avatarBg: 'bg-[#dfe7ee]',
+        avatarText: 'text-[#2a3a48]',
+        name: 'text-[#2f3d4c]',
+      }
+    case 'elise':
+      return {
+        avatarBg: 'bg-[#dde8e1]',
+        avatarText: 'text-[#1e3d30]',
+        name: 'text-[#254033]',
+      }
+    default:
+      return {
+        avatarBg: 'bg-[#e8e8e8]',
+        avatarText: 'text-[#2a2a2a]',
+        name: 'text-[#0f0f0f]',
+      }
+  }
+}
+
+function HumanFeedRow({ msg }: { msg: FeedMessage }) {
+  const inits = humanInitials(msg.authorName)
+  if (msg.authorId === DEMO_HUMAN_AUTHOR.id) {
+    return (
+      <article
+        className="nave-enter flex w-full justify-end"
+        aria-label={`Your message at ${msg.timestamp}`}
+      >
+        <div className="flex max-w-[min(92%,30rem)] flex-row-reverse items-start gap-3">
+          <div className="shrink-0 self-start" aria-hidden>
+            <div className="flex h-9 w-9 items-center justify-center rounded-[4px] bg-[#002FA7] text-[13px] font-medium leading-none text-white">
+              {inits}
+            </div>
+          </div>
+          <div className="min-w-0 rounded-[12px] rounded-br-[4px] border border-[#9eb6d9] bg-[#d4e1f4] px-3.5 py-2.5">
+            <div className="flex flex-wrap items-baseline justify-end gap-x-2 gap-y-0">
+              <p className="m-0 text-[13px] font-medium text-[#002FA7]">{msg.authorName}</p>
+              <p className="m-0 text-[13px] uppercase tracking-[0.08em] text-[#5a7194]">
+                {msg.timestamp}
+              </p>
+            </div>
+            <p className="m-0 mt-1 text-[14px] leading-[1.65] text-[#1a2332]">{msg.text}</p>
+          </div>
+        </div>
+      </article>
+    )
+  }
+
+  const lane = humanLaneForAuthor(msg.authorId)
+  return (
+    <article
+      className="nave-float flex gap-3"
+      aria-label={`Message from ${msg.authorName} at ${msg.timestamp}`}
+    >
+      <div className="shrink-0">
+        <div
+          className={`flex h-9 w-9 items-center justify-center rounded-[4px] text-[13px] font-medium leading-none ${lane.avatarBg} ${lane.avatarText}`}
+          aria-hidden
+        >
+          {inits}
+        </div>
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0">
+          <p className={`m-0 text-[13px] font-medium ${lane.name}`}>{msg.authorName}</p>
+          <p className="m-0 text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">{msg.timestamp}</p>
+        </div>
+        <p className="m-0 mt-0.5 max-w-3xl text-[14px] leading-[1.65] text-[#303030]">{msg.text}</p>
+      </div>
+    </article>
+  )
+}
+
+const CHANNEL_FEED_BOTTOM_THRESHOLD_PX = 48
+/** Scroll-height growth past this uses smooth pin when stuck to bottom (e.g. new agent message). */
+const CHANNEL_FEED_SMOOTH_PIN_GROW_PX = 72
+
+function useChannelFeedAutoScroll(channelId: string) {
+  const feedScrollRef = useRef<HTMLElement | null>(null)
+  const feedContentRef = useRef<HTMLDivElement | null>(null)
+  const stickToBottomRef = useRef(true)
+  const prevScrollHeightRef = useRef(0)
+
+  const onFeedScroll = useCallback(() => {
+    const el = feedScrollRef.current
+    if (!el) return
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight
+    stickToBottomRef.current = dist <= CHANNEL_FEED_BOTTOM_THRESHOLD_PX
+  }, [])
+
+  useLayoutEffect(() => {
+    stickToBottomRef.current = true
+    prevScrollHeightRef.current = 0
+  }, [channelId])
+
+  useEffect(() => {
+    const scrollEl = feedScrollRef.current
+    const contentEl = feedContentRef.current
+    if (!scrollEl || !contentEl) return
+
+    const pinIfStuck = () => {
+      if (!stickToBottomRef.current) return
+      const sh = scrollEl.scrollHeight
+      const ch = scrollEl.clientHeight
+      const targetTop = Math.max(0, sh - ch)
+      const prev = prevScrollHeightRef.current
+      const delta = prev === 0 ? 0 : sh - prev
+      prevScrollHeightRef.current = sh
+
+      const reduceMotion =
+        typeof window !== 'undefined' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+      if (reduceMotion || prev === 0 || delta <= CHANNEL_FEED_SMOOTH_PIN_GROW_PX) {
+        scrollEl.scrollTop = targetTop
+        return
+      }
+
+      scrollEl.scrollTo({ top: targetTop, behavior: 'smooth' })
+    }
+
+    const ro = new ResizeObserver(pinIfStuck)
+    ro.observe(contentEl)
+    pinIfStuck()
+
+    return () => ro.disconnect()
+  }, [channelId])
+
+  const scrollFeedToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
+    stickToBottomRef.current = true
+    requestAnimationFrame(() => {
+      const el = feedScrollRef.current
+      if (!el) return
+      const top = Math.max(0, el.scrollHeight - el.clientHeight)
+      prevScrollHeightRef.current = el.scrollHeight
+      el.scrollTo({ top, behavior })
+    })
+  }, [])
+
+  return { feedScrollRef, feedContentRef, onFeedScroll, scrollFeedToBottom }
+}
+
+function PatchAckSkeletonRow() {
+  return (
+    <article
+      className="nave-enter flex w-full items-start gap-3"
+      aria-busy="true"
+      aria-label="Patch is preparing a reply"
+    >
+      <div
+        className="h-9 w-9 shrink-0 rounded-[4px] bg-[#d9d6cf] motion-safe:animate-pulse motion-reduce:animate-none"
+        aria-hidden
+      />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="mb-1 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+          <span
+            className="h-3.5 w-[4.5rem] rounded bg-[#d9d6cf] motion-safe:animate-pulse motion-reduce:animate-none"
+            aria-hidden
+          />
+          <span
+            className="h-3 w-10 rounded bg-[#e3e0d8] motion-safe:animate-pulse motion-reduce:animate-none"
+            aria-hidden
+          />
+          <span
+            className="h-3 w-12 rounded bg-[#e3e0d8] motion-safe:animate-pulse motion-reduce:animate-none"
+            aria-hidden
+          />
+        </header>
+        <div className="space-y-2">
+          <div
+            className="h-3.5 w-full max-w-xl rounded bg-[#e8e5de] motion-safe:animate-pulse motion-reduce:animate-none"
+            aria-hidden
+          />
+          <div
+            className="h-3.5 w-[92%] max-w-lg rounded bg-[#e8e5de] motion-safe:animate-pulse motion-reduce:animate-none"
+            aria-hidden
+          />
+        </div>
+        <p className="m-0 mt-2 text-[13px] text-[#9a9a9a]">Patch is replying…</p>
+      </div>
+    </article>
+  )
+}
+
 function WorkspaceFeedList({
   channelId,
   onOpenSubprocess,
@@ -525,7 +790,7 @@ function WorkspaceFeedList({
 
   if (messages.length === 0) {
     return (
-      <p className="text-[14px] text-[#5f5f5f]">No messages in this channel yet.</p>
+      <p className="text-[13px] text-[#5f5f5f]">No messages in this channel yet.</p>
     )
   }
 
@@ -580,20 +845,7 @@ function FeedMessageItem({
   const storeAgentRow = useNaveStore((s) => s.agents[msg.authorId])
 
   if (msg.type === 'human') {
-    const inits = humanInitials(msg.authorName)
-    return (
-      <MessageShell
-        avatar={
-          <div className="h-10 w-10 rounded-[4px] bg-[#d9d9d9] text-center text-[12px] leading-10 text-[#0f0f0f]">
-            {inits}
-          </div>
-        }
-        name={msg.authorName}
-        timestamp={msg.timestamp}
-      >
-        <p className="m-0">{msg.text}</p>
-      </MessageShell>
-    )
+    return <HumanFeedRow msg={msg} />
   }
 
   if (msg.type === 'agent') {
@@ -606,7 +858,7 @@ function FeedMessageItem({
       msg.paragraphs && msg.paragraphs.length > 0 ? (
         <>
           {msg.paragraphs.map((para, i) => (
-            <p key={`${msg.id}-p-${i}`} className={`m-0 ${i > 0 ? 'mt-2' : ''}`}>
+            <p key={`${msg.id}-p-${i}`} className={`m-0 ${i > 0 ? 'mt-1' : ''}`}>
               {para}
             </p>
           ))}
@@ -615,31 +867,109 @@ function FeedMessageItem({
         <p className="m-0">{msg.text}</p>
       )
 
-    const subprocessBlock = msg.subprocess ? (
-      <button
-        type="button"
-        onClick={() => onOpenSubprocess(msg.subprocess!.routeId)}
-        className="nave-float nave-rise mt-4 block w-full rounded-[6px] border border-[#d4d0c8] bg-white px-4 py-3 text-left hover:border-[#0f0f0f]"
-      >
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">Sub-process</p>
-            <p className="mt-1 font-medium text-[#0f0f0f]">{msg.subprocess.name}</p>
-          </div>
-          <p className="text-[12px] text-[#5f5f5f]">{msg.subprocess.subtitle}</p>
+    const subprocessList = feedMessageSubprocesses(msg)
+    const subprocessBlock =
+      subprocessList.length > 0 ? (
+        <div className="mt-2 space-y-2">
+          {subprocessList.map((sub: FeedSubprocessPayload) => {
+            const live = feedSubprocessLiveView(sub, storeAgentRow)
+            const isRunning = live.status === 'running'
+            const paper = sub.integration === 'paper-mcp'
+            const surfaceRunning = paper
+              ? 'border-[#d8cfc0] bg-[#f2ede4] hover:bg-[#e8e1d6]'
+              : 'border-[#c5cee0] bg-[#e8ecf6] hover:bg-[#dde4f2]'
+            const surfaceTerminal =
+              live.status === 'completed'
+                ? 'border-[#aec9a8] bg-[#e8f1e6] hover:bg-[#dde9da]'
+                : live.status === 'failed'
+                  ? 'border-[#e0b4b4] bg-[#fbecec] hover:bg-[#f5dede]'
+                  : 'border-[#ddcfb8] bg-[#f3ebdd] hover:bg-[#ebe2d2]'
+
+            const ariaLabel = isRunning
+              ? `${sub.name}, running, ${live.pct}%`
+              : `${sub.name}, ${live.status}, open run log`
+
+            return (
+              <button
+                key={`${msg.id}-${sub.routeId}`}
+                type="button"
+                onClick={() => onOpenSubprocess(sub.routeId)}
+                aria-label={ariaLabel}
+                className={`nave-float block w-full rounded-[6px] border px-4 text-left transition-colors motion-reduce:transition-none ${
+                  isRunning ? `${surfaceRunning} py-2.5` : `${surfaceTerminal} py-2.5`
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
+                  <div className="min-w-0">
+                    <p className="text-[13px] font-medium uppercase leading-none tracking-[0.1em] text-[#7a756c]">
+                      Sub-process
+                      {paper ? (
+                        <span className="ml-1.5 font-mono normal-case tracking-normal text-[#5c4f38]">
+                          · Paper MCP
+                        </span>
+                      ) : null}
+                    </p>
+                    <p className="mt-1 text-[13px] font-semibold leading-snug tracking-[-0.01em] text-[#141414]">
+                      {sub.name}
+                    </p>
+                  </div>
+                  {isRunning ? (
+                    <p className="max-w-[11rem] shrink-0 text-right text-[13px] leading-snug text-[#5a5a5a]">
+                      {sub.subtitle}
+                    </p>
+                  ) : (
+                    <StatusPillDarkText status={live.status} />
+                  )}
+                </div>
+                {isRunning && live.planMeta ? (
+                  <p className="mt-1 text-[13px] font-semibold uppercase tracking-[0.08em] text-[#5f6880]">
+                    {live.planMeta}
+                  </p>
+                ) : null}
+                {isRunning && live.phaseLabel ? (
+                  <p className="mt-0.5 text-[13px] leading-[1.45] text-[#3a3a3a]">
+                    {truncateFeedPhase(live.phaseLabel)}
+                  </p>
+                ) : null}
+                {isRunning ? (
+                  <>
+                    <div className="mt-1.5 flex items-baseline justify-between gap-2 text-[13px] font-medium uppercase tracking-[0.06em] text-[#6f6f6f]">
+                      <span>Running</span>
+                      <span className="tabular-nums tracking-tight text-[#1f1f1f]">{live.pct}%</span>
+                    </div>
+                    <div
+                      className="mt-1 h-1 overflow-hidden rounded-[2px] bg-[#d4d2cc]/90"
+                      role="progressbar"
+                      aria-valuenow={live.pct}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-label={`${sub.name} progress`}
+                    >
+                      <div
+                        className={`h-full rounded-[2px] transition-[width] duration-300 ease-out motion-reduce:transition-none ${
+                          paper ? 'bg-[#6b5e48]' : 'bg-[#002FA7]'
+                        }`}
+                        style={{ width: `${live.pct}%` }}
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <p className="mt-1.5 text-[13px] leading-snug text-[#5c5c5c]">
+                    {live.milestoneCount
+                      ? `${live.milestoneCount} milestone${live.milestoneCount === 1 ? '' : 's'} · `
+                      : ''}
+                    Open for full run log
+                  </p>
+                )}
+              </button>
+            )
+          })}
         </div>
-        <div className="mt-3 h-2 rounded-[3px] bg-[#ebebeb]">
-          <div
-            className="h-full rounded-[3px] bg-[#002FA7]"
-            style={{ width: `${msg.subprocess.progressPct}%` }}
-          />
-        </div>
-      </button>
-    ) : null
+      ) : null
 
     const permissionBlock =
       msg.permissionCard && cardState ? (
-        <div className="mt-4">
+        <div className="mt-3">
           <PermissionCard
             state={cardState}
             actionTitle={msg.permissionCard.actionTitle}
@@ -654,7 +984,7 @@ function FeedMessageItem({
 
     const completionBlock = msg.completionCard ? (
       <div
-        className="mt-4"
+        className="mt-3"
         onClickCapture={(e) => {
           const btn = (e.target as HTMLElement).closest('button')
           if (btn && btn.textContent?.includes('View run log')) {
@@ -673,31 +1003,35 @@ function FeedMessageItem({
     ) : null
 
     return (
-      <MockFeedMessage
-        variant="agent"
-        avatar={
-          <Avatar
-            initials={initials}
-            status={status}
-            className={storeAgentRow?.avatarClassName ?? 'bg-[#002FA7] text-white'}
-          />
-        }
-        senderName={msg.authorName}
-        senderTag="agent"
-        timestamp={msg.timestamp}
-        timestampDateTime={msg.timestampDateTime}
-        onSenderNameClick={() => onSenderNavigate(msg.authorId)}
-        agentMessage={
-          <>
-            {body}
-            {subprocessBlock}
-          </>
-        }
-        continuingLine={msg.continuingLine}
-      >
-        {permissionBlock}
-        {completionBlock}
-      </MockFeedMessage>
+      <div className="nave-enter w-full">
+        <MockFeedMessage
+          variant="agent"
+          density="feed"
+          avatar={
+            <Avatar
+              size="sm"
+              initials={initials}
+              status={status}
+              className={storeAgentRow?.avatarClassName ?? 'bg-[#002FA7] text-white'}
+            />
+          }
+          senderName={msg.authorName}
+          senderTag="agent"
+          timestamp={msg.timestamp}
+          timestampDateTime={msg.timestampDateTime}
+          onSenderNameClick={() => onSenderNavigate(msg.authorId)}
+          agentMessage={
+            <>
+              {body}
+              {subprocessBlock}
+            </>
+          }
+          continuingLine={msg.continuingLine}
+        >
+          {permissionBlock}
+          {completionBlock}
+        </MockFeedMessage>
+      </div>
     )
   }
 
@@ -711,8 +1045,10 @@ function Sidebar({
   homeActive,
   channelsCollapsed,
   agentsCollapsed,
+  sidebarCollapsed,
   onToggleChannels,
   onToggleAgents,
+  onToggleSidebar,
   onOpenHome,
   onSelectChannel,
   onSelectAgent,
@@ -724,24 +1060,72 @@ function Sidebar({
   homeActive: boolean
   channelsCollapsed: boolean
   agentsCollapsed: boolean
+  sidebarCollapsed: boolean
   onToggleChannels: () => void
   onToggleAgents: () => void
+  onToggleSidebar: () => void
   onOpenHome: () => void
   onSelectChannel: (name: string) => void
   onSelectAgent: (agentRouteId: string) => void
 }) {
   const storeAgents = useNaveStore((s) => s.agents)
 
+  if (sidebarCollapsed) {
+    return (
+      <aside className="flex h-full min-h-0 w-[48px] shrink-0 flex-col items-center border-r border-[var(--nave-sidebar-border)] bg-[var(--nave-sidebar-bg)]">
+        {/* Monogram */}
+        <div className="flex h-[73px] shrink-0 items-center justify-center">
+          <span className="select-none text-[13px] font-semibold tracking-[-0.02em] text-[#f5f4f0]">N</span>
+        </div>
+        <div className="w-6 border-t border-[var(--nave-sidebar-border)]" />
+        {/* Expand button */}
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={onToggleSidebar}
+            title="Expand sidebar"
+            className="nave-float nave-rise-dark group flex h-8 w-8 items-center justify-center rounded-[5px] border border-[var(--nave-sidebar-border)] bg-[var(--nave-sidebar-hover)] text-[var(--nave-sidebar-text-muted)] transition-colors hover:border-[rgba(255,255,255,0.18)] hover:bg-[rgba(255,255,255,0.1)] hover:text-[#f5f4f0]"
+          >
+            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="1.75" y="1.75" width="11.5" height="11.5" rx="1.75" />
+              <line x1="5.25" y1="1.75" x2="5.25" y2="13.25" />
+              <path d="M7 5.5L9 7.5L7 9.5" />
+            </svg>
+          </button>
+        </div>
+      </aside>
+    )
+  }
+
   return (
-    <aside className="flex h-full min-h-0 w-[220px] shrink-0 flex-col border-r border-[var(--nave-sidebar-border)] bg-[var(--nave-sidebar-bg)] text-[#f5f4f0]">
+    <aside className="flex h-full min-h-0 w-[260px] shrink-0 flex-col border-r border-[var(--nave-sidebar-border)] bg-[var(--nave-sidebar-bg)] text-[#f5f4f0]">
       <div className="border-b border-[var(--nave-sidebar-border)] px-6 py-6">
-        <p className="text-[11px] uppercase tracking-[0.08em] text-[var(--nave-sidebar-text-muted)]">
-          Workspace
-        </p>
-        <h1 className="mt-3 text-[20px] font-medium tracking-[-0.02em]">Nave</h1>
-        <p className="mt-2 text-[12px] text-[var(--nave-sidebar-subtle)]">
-          16 members. 3 active agents.
-        </p>
+        <div className="flex items-start justify-between">
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] uppercase tracking-[0.08em] text-[var(--nave-sidebar-text-muted)]">
+              Workspace
+            </p>
+            <h1 className="mt-3 text-[13px] font-medium tracking-[-0.02em]">Nave</h1>
+            <p className="mt-2 text-[13px] text-[var(--nave-sidebar-subtle)]">
+              16 members. 3 active agents.
+            </p>
+            <p className="mt-3 max-w-[14rem] text-[12px] leading-[1.45] text-[var(--nave-sidebar-text-muted)]">
+              Surfaces ease into place—cards and drawers settle, they don&apos;t snap.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onToggleSidebar}
+            title="Collapse sidebar"
+            className="nave-float nave-rise-dark mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-[5px] border border-transparent text-[var(--nave-sidebar-text-muted)] transition-colors hover:border-[var(--nave-sidebar-border)] hover:bg-[var(--nave-sidebar-hover)] hover:text-[#f5f4f0]"
+          >
+            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="1.75" y="1.75" width="11.5" height="11.5" rx="1.75" />
+              <line x1="5.25" y1="1.75" x2="5.25" y2="13.25" />
+              <path d="M8 5.5L6 7.5L8 9.5" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
@@ -758,7 +1142,7 @@ function Sidebar({
           >
             <span className="font-medium">Home</span>
             <span
-              className={`text-[11px] uppercase tracking-[0.08em] ${
+              className={`text-[13px] uppercase tracking-[0.08em] ${
                 homeActive ? 'text-[var(--nave-sidebar-subtle)]' : 'text-[var(--nave-sidebar-text-muted)]'
               }`}
             >
@@ -773,7 +1157,7 @@ function Sidebar({
           <button
             type="button"
             onClick={onToggleChannels}
-            className="nave-float nave-rise-dark flex w-full items-center justify-between px-2 text-left text-[11px] uppercase tracking-[0.08em] text-[var(--nave-sidebar-text-muted)] hover:text-[var(--nave-sidebar-text-secondary)]"
+            className="nave-float nave-rise-dark flex w-full items-center justify-between px-2 text-left text-[13px] uppercase tracking-[0.08em] text-[var(--nave-sidebar-text-muted)] hover:text-[var(--nave-sidebar-text-secondary)]"
           >
             <span>Channels</span>
             <span>{channelsCollapsed ? '+' : '-'}</span>
@@ -814,7 +1198,7 @@ function Sidebar({
           <button
             type="button"
             onClick={onToggleAgents}
-            className="nave-float nave-rise-dark flex w-full items-center justify-between px-2 text-left text-[11px] uppercase tracking-[0.08em] text-[var(--nave-sidebar-text-muted)] hover:text-[var(--nave-sidebar-text-secondary)]"
+            className="nave-float nave-rise-dark flex w-full items-center justify-between px-2 text-left text-[13px] uppercase tracking-[0.08em] text-[var(--nave-sidebar-text-muted)] hover:text-[var(--nave-sidebar-text-secondary)]"
           >
             <span>Agents</span>
             <span>{agentsCollapsed ? '+' : '-'}</span>
@@ -848,7 +1232,7 @@ function Sidebar({
                         <p className="truncate font-medium">{agent.name}</p>
                         <StatusPill status={agent.status} />
                       </div>
-                      <p className="mt-1 text-[12px] text-[var(--nave-sidebar-subtle)]">{agent.role}</p>
+                      <p className="mt-1 text-[13px] text-[var(--nave-sidebar-subtle)]">{agent.role}</p>
                     </div>
                   </button>
                 )
@@ -863,13 +1247,13 @@ function Sidebar({
           type="button"
           className="nave-float nave-rise-dark flex w-full items-center gap-3 rounded-[6px] border border-transparent px-2 py-2 text-left hover:border-[var(--nave-sidebar-border)] hover:bg-[var(--nave-sidebar-hover)]"
         >
-          <div className="relative h-9 w-9 shrink-0 rounded-[4px] bg-[var(--nave-sidebar-user-avatar)] text-center text-[12px] leading-9 text-[#f5f4f0]">
+          <div className="relative h-9 w-9 shrink-0 rounded-[4px] bg-[var(--nave-sidebar-user-avatar)] text-center text-[13px] leading-9 text-[#f5f4f0]">
             ZG
             <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border border-[var(--nave-sidebar-bg)] bg-[#4f8f42]" />
           </div>
           <div>
             <p className="font-medium">Zhiyuan</p>
-            <p className="text-[12px] text-[var(--nave-sidebar-subtle)]">online</p>
+            <p className="text-[13px] text-[var(--nave-sidebar-subtle)]">online</p>
           </div>
         </button>
       </div>
@@ -897,6 +1281,32 @@ function WorkspaceScreen({
   onCompletionViewRunLog: () => void
 }) {
   const [completionNoticeOpen, setCompletionNoticeOpen] = useState(false)
+  const messages = useNaveStore((s) => s.messages)
+  const agents = useNaveStore((s) => s.agents)
+  const permissionCardStates = useNaveStore((s) => s.permissionCardStates)
+  const headerMetrics = useMemo(
+    () => selectWorkspaceHeaderMetrics({ messages, agents, permissionCardStates }),
+    [messages, agents, permissionCardStates],
+  )
+  const workspaceMetrics = useMemo(
+    () => [
+      { label: 'Sub-processes', value: headerMetrics.subProcesses },
+      { label: 'Pending approvals', value: headerMetrics.pendingApprovals },
+      { label: 'Queue priority', value: headerMetrics.queuePriority },
+    ],
+    [headerMetrics],
+  )
+  const completionBanner = useMemo(
+    () => selectLatestFrontendCompletionBanner({ messages }),
+    [messages],
+  )
+  const bannerExpanded = Boolean(completionBanner) && completionNoticeOpen
+  const [composerDraft, setComposerDraft] = useState('')
+  const sendChannelMessage = useNaveStore((s) => s.sendChannelMessage)
+  const frontendDemoAwaitingAssignment = useNaveStore((s) => s.frontendDemoAwaitingAssignment)
+  const frontendPatchAckPending = useNaveStore((s) => s.frontendPatchAckPending)
+  const { feedScrollRef, feedContentRef, onFeedScroll, scrollFeedToBottom } =
+    useChannelFeedAutoScroll(selectedChannelName)
 
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -904,18 +1314,18 @@ function WorkspaceScreen({
         <div className="flex items-start justify-between gap-6">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-3">
-              <h2 className="text-[22px] font-medium tracking-[-0.02em]">#{selectedChannelName}</h2>
+              <h2 className="text-[13px] font-medium tracking-[-0.02em]">#{selectedChannelName}</h2>
               {channelFocusAgent ? (
                 <>
-                  <span className="rounded-[3px] border border-[#d4d0c8] px-2 py-1 text-[12px] text-[#5f5f5f]">
+                  <span className="rounded-[3px] border border-[#d4d0c8] px-2 py-1 text-[13px] text-[#5f5f5f]">
                     Focus: `{channelFocusAgent.name}`
                   </span>
-                  <span className="text-[12px] text-[#5f5f5f]">
+                  <span className="text-[13px] text-[#5f5f5f]">
                     {channelFocusAgent.subProcessCount} tracked sub-processes
                   </span>
                 </>
               ) : (
-                <span className="rounded-[3px] border border-[#d4d0c8] px-2 py-1 text-[12px] text-[#5f5f5f]">
+                <span className="rounded-[3px] border border-[#d4d0c8] px-2 py-1 text-[13px] text-[#5f5f5f]">
                   No agent stationed in this channel
                 </span>
               )}
@@ -926,7 +1336,7 @@ function WorkspaceScreen({
             >
               <div className="workspace-header-drawer-inner">
                 <div className="workspace-header-drawer-content">
-                  <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">
+                  <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">
                     About this channel
                   </p>
                   <p className="mt-2 max-w-2xl text-[13px] text-[#5f5f5f]">
@@ -934,7 +1344,7 @@ function WorkspaceScreen({
                   </p>
                   {channelFocusAgent ? (
                     <>
-                      <p className="mt-4 text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">
+                      <p className="mt-4 text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">
                         Current task · {channelFocusAgent.name}
                       </p>
                       <p className="mt-2 max-w-2xl text-[13px] text-[#5f5f5f]">
@@ -952,7 +1362,7 @@ function WorkspaceScreen({
               >
                 <div className="workspace-header-drawer-inner">
                   <div className="workspace-header-drawer-content min-w-0">
-                    <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">
+                    <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">
                       Current task · {channelFocusAgent.name}
                     </p>
                     <p className="mt-1 truncate text-[13px] leading-5 text-[#5f5f5f]">
@@ -999,8 +1409,8 @@ function WorkspaceScreen({
                   key={metric.label}
                   className="nave-surface rounded-[6px] border border-[#d4d0c8] hover:border-[#bfbab0] px-4 py-3"
                 >
-                  <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">{metric.label}</p>
-                  <p className="mt-2 text-[22px] font-medium tracking-[-0.01em] text-[#0f0f0f]">
+                  <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">{metric.label}</p>
+                  <p className="mt-2 text-[13px] font-medium tracking-[-0.01em] text-[#0f0f0f]">
                     {metric.value}
                   </p>
                 </div>
@@ -1010,16 +1420,19 @@ function WorkspaceScreen({
         </div>
       </header>
 
-      <div
-        key={selectedChannelName}
-        className="flex min-h-0 min-w-0 flex-1 flex-col"
-      >
-        <div className="nave-enter nave-float border-b border-[#cfd7eb] bg-[#eef3ff] px-8 py-2.5 transition-colors">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            {completionNoticeOpen ? (
+        <div
+          key={selectedChannelName}
+          className="flex min-h-0 min-w-0 flex-1 flex-col"
+        >
+        {completionBanner && selectedChannelName === 'frontend' ? (
+          <div className="nave-enter nave-float border-b border-[#cfd7eb] bg-[#eef3ff] px-8 py-2.5 transition-colors">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+            {bannerExpanded ? (
               <>
                 <p className="text-[13px] text-[#303030]">
-                  `Scout` finished consolidating permission patterns for `src/queue/permission-sync.ts`.
+                  <span className="font-medium text-[#0f0f0f]">Patch</span> completed{' '}
+                  {completionBanner.taskName}. {completionBanner.filesLabel} in{' '}
+                  {completionBanner.durationSnippet}.
                 </p>
                 <div className="flex flex-wrap items-center gap-3">
                   <button
@@ -1031,61 +1444,77 @@ function WorkspaceScreen({
                   <button
                     type="button"
                     onClick={() => setCompletionNoticeOpen(false)}
-                    className="nave-float nave-rise text-[12px] text-[#5f5f5f] underline underline-offset-4"
+                    className="nave-float nave-rise text-[13px] text-[#5f5f5f] underline underline-offset-4"
                   >
                     Hide
                   </button>
                 </div>
               </>
             ) : (
-              <>
-                <p className="text-[12px] text-[#5f5f5f]">
-                  <span className="font-medium text-[#0f0f0f]">Completion</span>
-                  {' · '}
-                  Scout updated `permission-sync.ts`
-                </p>
-                <button
-                  type="button"
-                  onClick={() => setCompletionNoticeOpen(true)}
-                  className="nave-float nave-rise text-[12px] text-[#002FA7] underline underline-offset-4"
-                >
-                  Show details
-                </button>
-              </>
-            )}
+                <>
+                  <p className="text-[13px] text-[#5f5f5f]">
+                    <span className="font-medium text-[#0f0f0f]">Completion</span>
+                    {' · '}
+                    Patch · {completionBanner.taskName}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setCompletionNoticeOpen(true)}
+                    className="nave-float nave-rise text-[13px] text-[#002FA7] underline underline-offset-4"
+                  >
+                    Show details
+                  </button>
+                </>
+              )}
+            </div>
           </div>
-        </div>
+        ) : null}
 
-        <section className="min-h-0 flex-1 overflow-y-auto px-8 py-8">
-          <div className="nave-stagger mx-auto flex max-w-4xl flex-col gap-8">
+        <section
+          ref={feedScrollRef}
+          onScroll={onFeedScroll}
+          className="min-h-0 flex-1 scroll-pb-8 overflow-y-auto overflow-x-hidden px-6 py-5"
+        >
+          <div ref={feedContentRef} className="mx-auto flex max-w-4xl flex-col gap-3">
             <WorkspaceFeedList
               channelId={selectedChannelName}
               onOpenSubprocess={onOpenSubprocess}
               onSenderNavigate={onSenderAgentNavigate}
               onCompletionViewRunLog={onCompletionViewRunLog}
             />
+            {selectedChannelName === 'frontend' && frontendPatchAckPending ? (
+              <PatchAckSkeletonRow />
+            ) : null}
           </div>
         </section>
 
         <footer className="bg-[#f5f4f0] px-8 py-5">
           <div className="mx-auto max-w-4xl">
-            <label className="mb-2 block text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">
-              Message input
-            </label>
-            <div className="nave-enter nave-float flex items-center gap-3 rounded-[6px] border border-[#d4d0c8] bg-white px-4 py-3 transition-colors">
+            
+            <form
+              className="nave-enter nave-float flex items-center gap-3 rounded-[6px] border border-[#d4d0c8] bg-white px-4 py-3 transition-colors"
+              onSubmit={(e) => {
+                e.preventDefault()
+                sendChannelMessage(selectedChannelName, composerDraft)
+                setComposerDraft('')
+                scrollFeedToBottom('auto')
+              }}
+            >
               <input
                 aria-label="Message channel or agent"
                 className="w-full bg-transparent outline-none placeholder:text-[#9a9a9a]"
                 placeholder="Message #channel or @agent..."
                 type="text"
+                value={composerDraft}
+                onChange={(e) => setComposerDraft(e.target.value)}
               />
               <button
-                type="button"
+                type="submit"
                 className="nave-float nave-rise rounded-[4px] border border-[#d4d0c8] px-4 py-2 text-[13px] text-[#0f0f0f] hover:bg-[#ebebeb]"
               >
                 Send
               </button>
-            </div>
+            </form>
           </div>
         </footer>
       </div>
@@ -1158,13 +1587,13 @@ function HomeScreen({
   onNavigateToChannel: (channelKey: string, focusMessageId?: string) => void
 }) {
   const [activityFeedOpen, setActivityFeedOpen] = useState(false)
-  const [, setTimeTicker] = useState(0)
+  const [nowMs, setNowMs] = useState(() => Date.now())
   const messages = useNaveStore((s) => s.messages)
   const permissionCardStates = useNaveStore((s) => s.permissionCardStates)
   const storeAgents = useNaveStore((s) => s.agents)
 
   useEffect(() => {
-    const id = window.setInterval(() => setTimeTicker((n) => n + 1), 60_000)
+    const id = window.setInterval(() => setNowMs(Date.now()), 60_000)
     return () => window.clearInterval(id)
   }, [])
 
@@ -1185,16 +1614,16 @@ function HomeScreen({
       <header className="border-b border-[#d4d0c8] bg-[#f5f4f0] px-8 py-6">
         <div className="flex items-start justify-between gap-6">
           <div className="min-w-0">
-            <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">Mission control</p>
-            <h2 className="mt-3 text-[24px] font-medium tracking-[-0.02em]">Workspace overview</h2>
+            <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">Mission control</p>
+            <h2 className="mt-3 text-[13px] font-medium tracking-[-0.02em]">Workspace overview</h2>
             <p className="mt-2 max-w-3xl text-[13px] text-[#5f5f5f]">
               A cross-workspace view of active agents, blocking approvals, and the events that need
               attention right now.
             </p>
           </div>
           <div className="nave-surface rounded-[4px] border border-[#d4d0c8] px-5 py-4 hover:border-[#bfbab0]">
-            <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">Open approvals</p>
-            <p className="mt-2 text-[24px] font-medium tracking-[-0.01em] text-[#002FA7]">
+            <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">Open approvals</p>
+            <p className="mt-2 text-[13px] font-medium tracking-[-0.01em] text-[#002FA7]">
               {String(pendingRows.length).padStart(2, '0')}
             </p>
           </div>
@@ -1208,14 +1637,14 @@ function HomeScreen({
               <header className="border-b border-[#d4d0c8] pb-6">
                 <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
                   <div>
-                    <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">
+                    <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">
                       Active agents
                     </p>
-                    <p className="mt-3 max-w-xl text-[20px] font-medium leading-snug tracking-[-0.02em]">
+                    <p className="mt-3 max-w-xl text-[13px] font-medium leading-snug tracking-[-0.02em]">
                       Who is working across the workspace.
                     </p>
                   </div>
-                  <p className="text-[12px] text-[#5f5f5f]">{visibleAgentCount} agents visible</p>
+                  <p className="text-[13px] text-[#5f5f5f]">{visibleAgentCount} agents visible</p>
                 </div>
               </header>
 
@@ -1242,10 +1671,10 @@ function HomeScreen({
                       }`}
                     >
                       <div className="flex items-center justify-between gap-3">
-                        <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">
+                        <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">
                           {status === 'blocked' ? 'Needs attention' : 'Active'}
                         </p>
-                        <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">
+                        <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">
                           #{live.channel}
                         </p>
                       </div>
@@ -1260,7 +1689,7 @@ function HomeScreen({
                             <p className="break-words font-medium text-[#0f0f0f] [overflow-wrap:anywhere]">
                               {live.name}
                             </p>
-                            <p className="mt-1 break-words text-[12px] text-[#5f5f5f] [overflow-wrap:anywhere]">
+                            <p className="mt-1 break-words text-[13px] text-[#5f5f5f] [overflow-wrap:anywhere]">
                               {live.role}
                             </p>
                           </div>
@@ -1275,15 +1704,15 @@ function HomeScreen({
                       <div className="mt-5 min-w-0 border-t border-[#e8e6e1] pt-4">
                         <div className="flex flex-wrap items-baseline gap-x-8 gap-y-2">
                           <div className="flex min-w-0 items-baseline gap-2">
-                            <span className="shrink-0 text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">
+                            <span className="shrink-0 text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">
                               Sub-processes
                             </span>
-                            <span className="text-[15px] font-medium tabular-nums text-[#0f0f0f]">
+                            <span className="text-[13px] font-medium tabular-nums text-[#0f0f0f]">
                               {live.currentTask.subProcessCount}
                             </span>
                           </div>
                           <div className="flex min-w-0 items-baseline gap-2">
-                            <span className="shrink-0 text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">
+                            <span className="shrink-0 text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">
                               Running
                             </span>
                             <span className="text-[13px] font-medium text-[#0f0f0f]">{runningFor}</span>
@@ -1294,7 +1723,7 @@ function HomeScreen({
                           <HomeCardLastHumanTouch detail={lastHumanTouch} />
                         </div>
 
-                        <p className="mt-3 text-[12px] font-medium text-[#5f5f5f] transition-colors group-hover:text-[#002FA7]">
+                        <p className="mt-3 text-[13px] font-medium text-[#5f5f5f] transition-colors group-hover:text-[#002FA7]">
                           Open cockpit →
                         </p>
                       </div>
@@ -1309,14 +1738,14 @@ function HomeScreen({
             <section className="nave-enter nave-surface rounded-[6px] border border-[#d8b56a] bg-[#fff8eb] p-6 xl:p-7 hover:border-[#c4a85c]">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <p className="text-[11px] uppercase tracking-[0.08em] text-[#8b6a28]">
+                  <p className="text-[13px] uppercase tracking-[0.08em] text-[#8b6a28]">
                     Pending permission requests
                   </p>
-                  <p className="mt-2 text-[18px] font-medium tracking-[-0.01em] text-[#0f0f0f]">
+                  <p className="mt-2 text-[13px] font-medium tracking-[-0.01em] text-[#0f0f0f]">
                     These need human attention now.
                   </p>
                 </div>
-                <p className="text-[12px] text-[#8b6a28]">{pendingRows.length} waiting</p>
+                <p className="text-[13px] text-[#8b6a28]">{pendingRows.length} waiting</p>
               </div>
 
               <div className="mt-6 space-y-3">
@@ -1324,7 +1753,7 @@ function HomeScreen({
                   <p className="text-[13px] text-[#5f5f5f]">No pending permission requests.</p>
                 ) : (
                   pendingRows.map((row) => {
-                    const waitingMs = Math.max(0, Date.now() - new Date(row.timestampDateTime).getTime())
+                    const waitingMs = Math.max(0, nowMs - new Date(row.timestampDateTime).getTime())
                     return (
                       <button
                         key={row.messageId}
@@ -1336,12 +1765,12 @@ function HomeScreen({
                           <p className="font-medium text-[#0f0f0f]">
                             {row.agentName} · #{row.channelId}
                           </p>
-                          <p className="text-[11px] uppercase tracking-[0.08em] text-[#8b6a28]">
+                          <p className="text-[13px] uppercase tracking-[0.08em] text-[#8b6a28]">
                             Waiting {formatStoreElapsedMs(waitingMs)}
                           </p>
                         </div>
                         <p className="mt-3 text-[13px] leading-6 text-[#5b4b2d]">{row.actionTitle}</p>
-                        <div className="mt-3 rounded-[4px] border border-[#ead8b0] bg-[#fff8eb] px-3 py-2 font-mono text-[12px] text-[#6e5424]">
+                        <div className="mt-3 rounded-[4px] border border-[#ead8b0] bg-[#fff8eb] px-3 py-2 font-mono text-[13px] text-[#6e5424]">
                           {row.resource}
                         </div>
                       </button>
@@ -1354,17 +1783,17 @@ function HomeScreen({
             <section className="nave-enter nave-surface min-w-0 rounded-[4px] border border-[#d4d0c8] bg-[#f5f4f0] p-6 xl:p-7 hover:border-[#bfbab0]">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">
+                  <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">
                     Unified activity feed
                   </p>
-                  <p className="mt-3 max-w-[18rem] text-[17px] font-medium leading-snug tracking-[-0.015em]">
+                  <p className="mt-3 max-w-[18rem] text-[13px] font-medium leading-snug tracking-[-0.015em]">
                     Significant events across all channels.
                   </p>
                 </div>
                 <button
                   type="button"
                   onClick={() => setActivityFeedOpen((open) => !open)}
-                  className="nave-float nave-rise shrink-0 rounded-[4px] border border-[#d4d0c8] bg-white px-3 py-1.5 text-[12px] text-[#0f0f0f] hover:bg-[#ebebeb]"
+                  className="nave-float nave-rise shrink-0 rounded-[4px] border border-[#d4d0c8] bg-white px-3 py-1.5 text-[13px] text-[#0f0f0f] hover:bg-[#ebebeb]"
                 >
                   {activityFeedOpen ? 'Show less' : `Show full feed · ${activityEvents.length}`}
                 </button>
@@ -1398,7 +1827,7 @@ function HomeScreen({
                               <ActivityBadge kind={missionFeedEventBadgeKind(ev)} />
                               <p className="font-medium text-[#0f0f0f]">{missionFeedEventTitle(ev)}</p>
                             </div>
-                            <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">
+                            <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">
                               {ev.displayTime}
                             </p>
                           </div>
@@ -1412,7 +1841,7 @@ function HomeScreen({
                 </div>
               ) : (
                 <div className="mt-5 border-t border-[#d4d0c8] pt-5">
-                  <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">Latest</p>
+                  <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">Latest</p>
                   {latestEvent ? (
                     <div className="mt-2 flex flex-wrap items-start justify-between gap-3">
                       <div className="flex min-w-0 items-center gap-3">
@@ -1490,10 +1919,10 @@ function AgentCockpitScreen({
                 className={storeAgent.avatarClassName}
               />
               <div>
-                <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">
+                <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">
                   Agent cockpit
                 </p>
-                <h2 className="mt-2 text-[24px] font-medium tracking-[-0.02em]">{storeAgent.name}</h2>
+                <h2 className="mt-2 text-[13px] font-medium tracking-[-0.02em]">{storeAgent.name}</h2>
                 <p className="mt-2 max-w-2xl text-[13px] text-[#5f5f5f]">{storeAgent.identitySummary}</p>
               </div>
             </div>
@@ -1522,8 +1951,8 @@ function AgentCockpitScreen({
             <section className="nave-surface rounded-[6px] border border-[#d4d0c8] bg-[#f5f4f0] p-6 hover:border-[#bfbab0] lg:p-8">
               <div className="flex items-center justify-between gap-4">
                 <div>
-                  <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">Current task</p>
-                  <p className="mt-3 max-w-3xl text-[20px] font-medium leading-snug tracking-[-0.02em]">
+                  <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">Current task</p>
+                  <p className="mt-3 max-w-3xl text-[13px] font-medium leading-snug tracking-[-0.02em]">
                     {storeAgent.currentTask.description}
                   </p>
                 </div>
@@ -1542,7 +1971,7 @@ function AgentCockpitScreen({
             </section>
 
             <section className="nave-surface flex flex-col justify-between rounded-[4px] border border-[#d4d0c8] bg-[#f5f4f0] p-5 hover:border-[#bfbab0] lg:p-6">
-              <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">Identity</p>
+              <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">Identity</p>
               <dl className="mt-5 space-y-4">
                 <IdentityRow label="Role" value={storeAgent.role} />
                 <IdentityRow label="Lives in" value={channelLabel} />
@@ -1558,12 +1987,12 @@ function AgentCockpitScreen({
           <section className="border-t border-[#d4d0c8] pt-10">
             <div className="flex flex-wrap items-baseline justify-between gap-3">
               <div>
-                <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">Sub-processes</p>
-                <p className="mt-3 max-w-lg text-[18px] font-medium leading-snug tracking-[-0.01em]">
+                <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">Sub-processes</p>
+                <p className="mt-3 max-w-lg text-[13px] font-medium leading-snug tracking-[-0.01em]">
                   Ephemeral workers spawned from this run.
                 </p>
               </div>
-              <p className="text-[12px] text-[#5f5f5f]">{subProcesses.length} tracked in this run</p>
+              <p className="text-[13px] text-[#5f5f5f]">{subProcesses.length} tracked in this run</p>
             </div>
 
             <div className="mt-7 space-y-3">
@@ -1583,8 +2012,15 @@ function AgentCockpitScreen({
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div>
                           <p className="font-medium text-[#0f0f0f]">{subprocess.name}</p>
-                          <p className="mt-1 text-[12px] text-[#5f5f5f]">
-                            {subprocess.type} · {formatStoreElapsedMs(subprocess.elapsedMs)}
+                          <p className="mt-1 text-[13px] text-[#5f5f5f]">
+                            {subprocess.type}
+                            {subprocess.integration === 'paper-mcp' ? (
+                              <span className="ml-2 rounded-[3px] border border-[#c8b89a] px-1.5 py-0.5 font-mono text-[13px] text-[#5c4f38]">
+                                Paper MCP
+                              </span>
+                            ) : null}
+                            {' · '}
+                            {formatStoreElapsedMs(subprocess.elapsedMs)}
                           </p>
                         </div>
                         <StatusPillDarkText status={subprocessStatus} />
@@ -1597,7 +2033,9 @@ function AgentCockpitScreen({
                               : subprocessStatus === 'killed'
                                 ? 'bg-[#c18a26]'
                                 : subprocessStatus === 'running'
-                                  ? 'bg-[#002FA7]'
+                                  ? subprocess.integration === 'paper-mcp'
+                                    ? 'bg-[#6b5e48]'
+                                    : 'bg-[#002FA7]'
                                   : 'bg-[#9a9a9a]'
                           }`}
                           style={{ width: `${subprocess.progress}%` }}
@@ -1616,7 +2054,7 @@ function AgentCockpitScreen({
 
           <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1.08fr)_minmax(0,0.92fr)] lg:gap-12">
             <section className="nave-surface order-2 rounded-[6px] border border-[#d4d0c8] bg-[#f5f4f0] p-6 hover:border-[#bfbab0] lg:order-1">
-              <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">Task history</p>
+              <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">Task history</p>
               <div className="mt-6 space-y-2">
                 {taskHistoryRows.map((task) => (
                   <div
@@ -1624,16 +2062,16 @@ function AgentCockpitScreen({
                     className="nave-surface grid gap-2 rounded-[4px] border border-[#d4d0c8] bg-white px-4 py-3.5 hover:border-[#bfbab0] sm:grid-cols-[1fr_auto_auto_auto]"
                   >
                     <p className="font-medium text-[#0f0f0f]">{task.name}</p>
-                    <p className="text-[12px] text-[#5f5f5f]">{task.duration}</p>
+                    <p className="text-[13px] text-[#5f5f5f]">{task.duration}</p>
                     <OutcomePill outcome={task.outcome} />
-                    <p className="text-[12px] text-[#5f5f5f]">{task.filesChanged}</p>
+                    <p className="text-[13px] text-[#5f5f5f]">{task.filesChanged}</p>
                   </div>
                 ))}
               </div>
             </section>
 
             <section className="nave-surface order-1 rounded-[4px] border border-[#d4d0c8] bg-[#f5f4f0] p-6 hover:border-[#bfbab0] lg:order-2 lg:pt-8">
-              <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">Memory summary</p>
+              <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">Memory summary</p>
               <div className="mt-5 space-y-5">
                 <MemoryBlock title="Recent decisions" items={memoryView.recentDecisions} />
                 <MemoryBlock title="Open threads" items={memoryView.openThreads} />
@@ -1656,73 +2094,125 @@ function SubprocessDetailScreen({
   subprocess: Agent['subprocesses'][number]
   onOpenAgentCockpit: () => void
 }) {
-  return (
-    <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <header className="border-b border-[#d4d0c8] bg-[#f5f4f0] px-8 py-6">
-        <div className="flex items-start justify-between gap-6">
-          <div className="min-w-0">
-            <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">Parent agent</p>
-            <button
-              type="button"
-              onClick={onOpenAgentCockpit}
-              className="nave-float nave-rise mt-3 flex w-full items-center gap-3 border-0 bg-transparent p-0 text-left"
-            >
-              <Avatar initials={agent.initials} status={agent.status} className={agent.avatarClassName} />
-              <div>
-                <p className="text-[18px] font-medium tracking-[-0.01em]">{agent.name}</p>
-                <p className="mt-1 text-[13px] text-[#5f5f5f]">
-                  {subprocess.type} · {subprocess.elapsed}
-                </p>
-              </div>
-            </button>
-          </div>
+  const footerTint =
+    subprocess.status === 'running'
+      ? 'border-[#cfd7eb] bg-[#eef3ff]'
+      : subprocess.status === 'completed'
+        ? 'border-[#bcd5c1] bg-[#f1f8f2]'
+        : subprocess.status === 'killed'
+          ? 'border-[#d8b56a] bg-[#fff8eb]'
+          : subprocess.status === 'failed'
+            ? 'border-[#d3b0b0] bg-[#f9efef]'
+            : subprocess.status === 'blocked'
+              ? 'border-[#d8b56a] bg-[#fff8eb]'
+              : 'border-[#d4d0c8] bg-[#f0f0f0]'
 
+  return (
+    <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-[#f5f4f0]">
+      <header className="shrink-0 border-b border-[#d4d0c8] bg-[#f5f4f0] px-6 py-3 sm:px-8">
+        <div className="mx-auto flex max-w-[40rem] flex-wrap items-center justify-between gap-3">
+          <button
+            type="button"
+            onClick={onOpenAgentCockpit}
+            className="nave-float nave-rise group flex max-w-[min(100%,20rem)] items-center gap-2 border-0 bg-transparent p-0 text-left"
+          >
+            <Avatar size="sm" initials={agent.initials} status={agent.status} className={agent.avatarClassName} />
+            <span className="min-w-0">
+              <span className="block text-[13px] font-medium uppercase tracking-[0.1em] text-[#9a9a9a]">
+                Parent agent
+              </span>
+              <span className="mt-0.5 block truncate text-[13px] font-medium text-[#303030] group-hover:text-[#0f0f0f]">
+                {agent.name}
+              </span>
+            </span>
+          </button>
           <StatusPillDarkText status={subprocess.status} />
         </div>
       </header>
 
-      <section className="min-h-0 flex-1 overflow-y-auto px-8 py-8">
-        <div className="nave-stagger mx-auto flex max-w-[52rem] flex-col gap-12">
-          <section className="min-w-0">
-            <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">Run metadata</p>
-            <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <DetailCard label="Sub-process" value={subprocess.name} highlight="primary" />
-              <DetailCard label="Type" value={subprocess.type} />
-              <DetailCard label="Elapsed" value={subprocess.elapsed} />
-              <DetailCard label="Status" value={subprocess.status} />
-            </div>
-          </section>
+      <section className="min-h-0 flex-1 overflow-y-auto px-6 pb-10 pt-8 sm:px-8">
+        <div className="mx-auto max-w-[40rem]">
+          <header className="relative min-w-0 border-l-[4px] border-[#002FA7] pl-5 pr-2">
+            <p className="text-[13px] font-semibold uppercase tracking-[0.12em] text-[#002FA7]">
+              Sub-process run
+            </p>
+            <h1 className="mt-2 text-[1.625rem] font-semibold leading-[1.2] tracking-[-0.035em] text-[#0f0f0f] sm:text-[1.875rem]">
+              {subprocess.name}
+            </h1>
+            <p className="mt-3 flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[13px] text-[#5f5f5f]">
+              <span className="font-semibold tabular-nums text-[#0f0f0f]">{subprocess.log.length}</span>
+              <span>steps recorded</span>
+              <span className="hidden text-[#d4cfc6] sm:inline" aria-hidden>
+                ·
+              </span>
+              <span className="tabular-nums">{subprocess.type}</span>
+              <span className="text-[#d4cfc6]" aria-hidden>
+                ·
+              </span>
+              <span className="tabular-nums">{subprocess.elapsed}</span>
+            </p>
+          </header>
 
-          <section className="min-w-0">
-            <div className="flex flex-wrap items-end justify-between gap-4 border-b border-[#d4d0c8] pb-5">
-              <div>
-                <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">Run transcript</p>
-                <p className="mt-3 max-w-md text-[19px] font-medium leading-snug tracking-[-0.015em] text-[#0f0f0f]">
-                  Live-ish step log from this ephemeral worker.
-                </p>
-                <p className="mt-2 max-w-lg text-[12px] leading-relaxed text-[#5f5f5f]">
-                  Step types are color-coded so you can scan reads, writes, analysis, and spawns without
-                  reading every line.
-                </p>
-              </div>
-              <p className="text-[12px] text-[#3d4f68]">
-                <span className="font-medium text-[#0f0f0f]">{subprocess.log.length}</span> steps
-                captured
+          <section aria-label="Step timeline" className="mt-8 min-w-0">
+            <div className="inline-flex flex-wrap items-center gap-1.5">
+              <p className="m-0 text-[13px] font-medium uppercase tracking-[0.1em] text-[#7a756c]">
+                What it did
               </p>
+              <div className="group relative z-10 inline-flex">
+                <span id={`subprocess-step-legend-${subprocess.id}`} className="sr-only">
+                  Each row is one step. The tag and colored left edge match the kind: Read (sources or
+                  files), Write (changes), Analyze (reasoning), Spawn (child work), MCP (tool or Paper
+                  MCP calls).
+                </span>
+                <button
+                  type="button"
+                  aria-describedby={`subprocess-step-legend-${subprocess.id}`}
+                  className="nave-float flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-[#c4bfb6] bg-[#f0eeea] text-[13px] font-semibold leading-none text-[#5c574f] outline-offset-2 hover:border-[#9a958c] hover:bg-[#e5e2dc] hover:text-[#2a2825] focus-visible:ring-2 focus-visible:ring-[#002FA7] focus-visible:ring-offset-2 focus-visible:ring-offset-[#f5f4f0] motion-reduce:transition-none"
+                >
+                  <span aria-hidden>?</span>
+                </button>
+                <div
+                  role="tooltip"
+                  className="pointer-events-none invisible absolute left-1/2 top-full z-30 mt-1.5 -translate-x-1/2 rounded-[8px] border border-[#c8c4bc] bg-[#faf9f7] p-2.5 opacity-0 shadow-[0_4px_24px_-4px_rgba(15,15,15,0.18)] transition-[opacity,visibility] duration-150 ease-out group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100 motion-reduce:transition-none"
+                >
+                  <ul className="m-0 list-none space-y-1 p-0">
+                    {([
+                      { type: 'read',    label: 'Read',    desc: 'Sources / files',  accent: '#5a7a9a', badge: 'border-[#8faabe] bg-[#f2f6fa] text-[#2a4560]' },
+                      { type: 'write',   label: 'Write',   desc: 'Changes made',     accent: '#9a6230', badge: 'border-[#c9a077] bg-[#fdf8f0] text-[#5c3d16]' },
+                      { type: 'analyze', label: 'Analyze', desc: 'Reasoning',        accent: '#3d6b52', badge: 'border-[#7d9d8a] bg-[#f2f7f3] text-[#254530]' },
+                      { type: 'spawn',   label: 'Spawn',   desc: 'Child work',       accent: '#b8892d', badge: 'border-[#c4a060] bg-[#faf6eb] text-[#6b4a10]' },
+                      { type: 'mcp',     label: 'MCP',     desc: 'Tool call',        accent: '#6b5e48', badge: 'border-[#c8b89a] bg-[#f8f5ef] text-[#4a3f2e]' },
+                    ] as const).map(({ label, desc, accent, badge }) => (
+                      <li key={label} className="flex items-center gap-2.5">
+                        <span
+                          className="h-6 w-[3px] shrink-0 rounded-full"
+                          style={{ backgroundColor: accent }}
+                        />
+                        <span className={`flex h-[22px] min-w-[3.2rem] items-center justify-center rounded-[3px] border px-2 text-[11px] font-semibold uppercase tracking-[0.07em] ${badge}`}>
+                          {label}
+                        </span>
+                        <span className="whitespace-nowrap text-[12px] text-[#6b6560]">{desc}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
             </div>
 
-            <div className="mt-5 rounded-[6px] border border-[#cfd7eb] bg-[#eef2f8] p-2">
-              <div className="overflow-hidden rounded-[4px] border border-[#d4d0c8] bg-white">
+            <div className="mt-4 overflow-hidden rounded-[8px] border-2 border-[#1a1a1a]/[0.08] bg-white p-2 shadow-[0_1px_0_0_rgba(0,47,167,0.06),0_12px_32px_-12px_rgba(15,15,15,0.12)] sm:p-2.5">
+              <div className="divide-y divide-[#ebe8e2] overflow-hidden rounded-[6px]">
                 {subprocess.log.map((step, index) => (
                   <div
-                    key={`${step.timestamp}-${step.description}`}
-                    className={`grid items-center gap-3 border-l-4 py-3.5 pl-3 pr-4 md:grid-cols-[auto_1fr_auto] ${subprocessStepAccent(step.type)} ${
-                      index > 0 ? 'border-t border-[#ebebeb]' : ''
-                    }`}
+                    key={`${step.timestamp}-${index}-${step.description}`}
+                    className={`flex flex-col gap-2.5 border-l-[4px] py-3.5 pl-4 pr-4 sm:flex-row sm:items-start sm:gap-4 sm:py-4 sm:pl-5 sm:pr-5 ${subprocessStepAccent(
+                      step.type,
+                    )}`}
                   >
-                    <StepTypeBadge type={step.type} />
-                    <p className="m-0 text-[13px] leading-[1.65] text-[#303030]">{step.description}</p>
-                    <p className="m-0 shrink-0 text-right text-[11px] uppercase tracking-[0.08em] text-[#7d8a9c] tabular-nums">
+                    <StepTypeBadge type={step.type} compact />
+                    <p className="m-0 min-w-0 flex-1 text-[13px] font-normal leading-[1.55] text-[#1a1a1a]">
+                      {step.description}
+                    </p>
+                    <p className="m-0 shrink-0 text-left text-[13px] font-medium uppercase tracking-[0.08em] text-[#8a8580] tabular-nums sm:mt-0.5 sm:w-[5.75rem] sm:text-right">
                       {step.timestamp}
                     </p>
                   </div>
@@ -1732,73 +2222,24 @@ function SubprocessDetailScreen({
           </section>
 
           {subprocess.partialResult ? (
-            <section className="nave-surface rounded-[6px] border border-[#d8b56a] bg-[#fff8eb] hover:border-[#c4a85c] p-6">
-              <p className="text-[11px] uppercase tracking-[0.08em] text-[#8b6a28]">Partial result</p>
-              <p className="mt-3 max-w-4xl text-[13px] leading-6 text-[#5b4b2d]">
-                {subprocess.partialResult}
+            <section className="mt-8 rounded-[6px] border border-[#e0c88a] bg-[#fffaf0] px-4 py-3.5">
+              <p className="text-[13px] font-semibold uppercase tracking-[0.08em] text-[#8b6a28]">
+                Partial result
               </p>
+              <p className="mt-2 text-[13px] leading-relaxed text-[#4a3d24]">{subprocess.partialResult}</p>
             </section>
           ) : null}
         </div>
       </section>
 
       <footer
-        className={`nave-float border-t px-8 py-4 transition-colors ${
-          subprocess.status === 'running'
-            ? 'border-[#cfd7eb] bg-[#eef3ff]'
-            : subprocess.status === 'completed'
-              ? 'border-[#bcd5c1] bg-[#f1f8f2]'
-              : subprocess.status === 'killed'
-                ? 'border-[#d8b56a] bg-[#fff8eb]'
-                : subprocess.status === 'failed'
-                  ? 'border-[#d3b0b0] bg-[#f9efef]'
-                  : subprocess.status === 'blocked'
-                    ? 'border-[#d8b56a] bg-[#fff8eb]'
-                    : 'border-[#d4d0c8] bg-[#f0f0f0]'
-        }`}
+        className={`nave-float shrink-0 border-t px-6 py-3.5 transition-colors sm:px-8 sm:py-4 ${footerTint}`}
       >
-        <div className="mx-auto flex max-w-[52rem] items-center justify-between gap-4">
-          <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">Sub-process status</p>
-          <p className="text-[13px] font-medium text-[#0f0f0f]">
-            {subprocess.status} · {subprocess.name}
-          </p>
-        </div>
+        <p className="mx-auto max-w-[40rem] text-center text-[13px] uppercase tracking-[0.08em] text-[#6b6b6b]">
+          Run {subprocess.status}
+        </p>
       </footer>
     </main>
-  )
-}
-
-function MessageShell({
-  avatar,
-  name,
-  timestamp,
-  children,
-  accent,
-}: {
-  avatar: ReactNode
-  name: string
-  timestamp: string
-  children: ReactNode
-  accent?: 'agent'
-}) {
-  return (
-    <article className="nave-float flex gap-4">
-      <div className="shrink-0">{avatar}</div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-3">
-          <p className={accent === 'agent' ? 'font-medium text-[#002FA7]' : 'font-medium text-[#0f0f0f]'}>
-            {name}
-          </p>
-          {accent === 'agent' ? (
-            <span className="rounded-[3px] border border-[#002FA7] px-2 py-0.5 text-[11px] uppercase tracking-[0.04em] text-[#002FA7]">
-              agent
-            </span>
-          ) : null}
-          <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">{timestamp}</p>
-        </div>
-        <div className="mt-2 max-w-3xl leading-7 text-[#303030]">{children}</div>
-      </div>
-    </article>
   )
 }
 
@@ -1806,13 +2247,16 @@ function Avatar({
   initials,
   status,
   className,
+  size = 'md',
 }: {
   initials: string
   status: AgentStatus
   className: string
+  size?: 'sm' | 'md'
 }) {
+  const box = size === 'sm' ? 'h-9 w-9 text-[13px] leading-9' : 'h-10 w-10 text-[13px] leading-10'
   return (
-    <div className={`relative h-10 w-10 rounded-[4px] text-center text-[12px] leading-10 ${className}`}>
+    <div className={`relative rounded-[4px] text-center ${box} ${className}`}>
       {initials}
       <span
         className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border border-[#0f0f0f] ${
@@ -1837,7 +2281,7 @@ function StatusPill({ status }: { status: AgentStatus }) {
 
   return (
     <span
-      className={`rounded-[3px] border px-2 py-0.5 text-[11px] uppercase tracking-[0.04em] ${styles}`}
+      className={`rounded-[3px] border px-2 py-0.5 text-[13px] uppercase tracking-[0.04em] ${styles}`}
     >
       {status}
     </span>
@@ -1860,7 +2304,7 @@ function StatusPillDarkText({ status }: { status: AgentStatus | ProcessStatus })
 
   return (
     <span
-      className={`rounded-[3px] border px-2 py-0.5 text-[11px] uppercase tracking-[0.04em] ${styles}`}
+      className={`inline-flex items-center rounded-[3px] border px-2 py-0.5 text-[13px] uppercase tracking-[0.04em] ${styles}`}
     >
       {status}
     </span>
@@ -1870,8 +2314,8 @@ function StatusPillDarkText({ status }: { status: AgentStatus | ProcessStatus })
 function MetricCard({ label, value }: { label: string; value: string }) {
   return (
     <div className="nave-surface rounded-[6px] border border-[#d4d0c8] hover:border-[#bfbab0] bg-white px-4 py-4">
-      <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">{label}</p>
-      <p className="mt-2 text-[22px] font-medium tracking-[-0.01em] text-[#0f0f0f]">{value}</p>
+      <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">{label}</p>
+      <p className="mt-2 text-[13px] font-medium tracking-[-0.01em] text-[#0f0f0f]">{value}</p>
     </div>
   )
 }
@@ -1879,10 +2323,10 @@ function MetricCard({ label, value }: { label: string; value: string }) {
 function HomeCardLastHumanTouch({ detail }: { detail: LastHumanTouchDetail | null }) {
   return (
     <div className="min-w-0 max-w-full">
-      <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">Latest human message</p>
+      <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">Latest human message</p>
       {detail ? (
         <div className="mt-2 space-y-1.5">
-          <p className="text-[12px] leading-snug text-[#5f5f5f]">
+          <p className="text-[13px] leading-snug text-[#5f5f5f]">
             <span className="font-medium text-[#0f0f0f]">{detail.authorName}</span>
             <span className="text-[#b5b5b5]"> · </span>
             <span className="tabular-nums tracking-tight text-[#6b6b6b]">{detail.timeLabel}</span>
@@ -1906,7 +2350,7 @@ function LastHumanTouchIdentity({ value }: { value: LastHumanTouchDetail | null 
   }
   return (
     <div className="space-y-2">
-      <p className="text-[14px] leading-snug text-[#0f0f0f]">
+      <p className="text-[13px] leading-snug text-[#0f0f0f]">
         <span className="font-medium">{value.authorName}</span>
         <span className="text-[#9a9a9a]"> · </span>
         <span className="tabular-nums text-[13px] text-[#5f5f5f]">{value.timeLabel}</span>
@@ -1922,24 +2366,30 @@ function DetailCard({
   label,
   value,
   highlight,
+  dense,
 }: {
   label: string
   value: string
   /** Single focal metric — IKB */
   highlight?: 'primary'
+  dense?: boolean
 }) {
   const isPrimary = highlight === 'primary'
   return (
     <div
-      className={`nave-surface rounded-[6px] border px-4 py-4 ${
+      className={`nave-surface rounded-[6px] border ${
+        dense ? 'px-3 py-2.5' : 'px-4 py-4'
+      } ${
         isPrimary
           ? 'border-[#6685cc] bg-[#f7f9fd] hover:border-[#002FA7]'
           : 'border-[#d4d0c8] bg-white hover:border-[#bfbab0]'
       }`}
     >
-      <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">{label}</p>
+      <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">{label}</p>
       <p
-        className={`mt-2 text-[14px] leading-6 ${isPrimary ? 'font-medium text-[#002FA7]' : 'text-[#0f0f0f]'}`}
+        className={`${dense ? 'mt-1 text-[13px] leading-snug' : 'mt-2 text-[13px] leading-6'} ${
+          isPrimary ? 'font-medium text-[#002FA7]' : 'text-[#0f0f0f]'
+        }`}
       >
         {value}
       </p>
@@ -1950,8 +2400,8 @@ function DetailCard({
 function IdentityRow({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="border-b border-[#d4d0c8] pb-3 last:border-b-0 last:pb-0">
-      <dt className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">{label}</dt>
-      <dd className="mt-2 text-[14px] text-[#0f0f0f]">{value}</dd>
+      <dt className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">{label}</dt>
+      <dd className="mt-2 text-[13px] text-[#0f0f0f]">{value}</dd>
     </div>
   )
 }
@@ -1965,7 +2415,7 @@ function OutcomePill({ outcome }: { outcome: 'completed' | 'killed' | 'failed' }
         : 'border-[#d3b0b0] text-[#8b4b4b]'
 
   return (
-    <span className={`w-fit rounded-[3px] border px-2 py-0.5 text-[11px] uppercase tracking-[0.04em] ${styles}`}>
+    <span className={`w-fit rounded-[3px] border px-2 py-0.5 text-[13px] uppercase tracking-[0.04em] ${styles}`}>
       {outcome}
     </span>
   )
@@ -1981,15 +2431,18 @@ function subprocessStepAccent(type: SubprocessStepType): string {
       return 'border-l-[#3d6b52]'
     case 'spawn':
       return 'border-l-[#b8892d]'
+    case 'mcp':
+      return 'border-l-[#6b5e48]'
   }
 }
 
-function StepTypeBadge({ type }: { type: SubprocessStepType }) {
+function StepTypeBadge({ type, compact }: { type: SubprocessStepType; compact?: boolean }) {
   const labelMap: Record<SubprocessStepType, string> = {
     read: 'Read',
     write: 'Write',
     analyze: 'Analyze',
     spawn: 'Spawn',
+    mcp: 'MCP',
   }
 
   const styles: Record<SubprocessStepType, string> = {
@@ -1997,11 +2450,16 @@ function StepTypeBadge({ type }: { type: SubprocessStepType }) {
     write: 'border-[#c9a077] bg-[#fdf8f0] text-[#5c3d16]',
     analyze: 'border-[#7d9d8a] bg-[#f2f7f3] text-[#254530]',
     spawn: 'border-[#c4a060] bg-[#faf6eb] text-[#6b4a10]',
+    mcp: 'border-[#c8b89a] bg-[#f8f5ef] text-[#4a3f2e]',
   }
+
+  const box = compact
+    ? 'h-7 min-w-[3rem] px-2 text-[13px] tracking-[0.07em]'
+    : 'h-8 min-w-[2.5rem] px-2 text-[13px] tracking-[0.08em]'
 
   return (
     <div
-      className={`flex h-7 shrink-0 items-center justify-center rounded-[4px] border px-2 text-[11px] font-medium uppercase tracking-[0.08em] ${styles[type]}`}
+      className={`flex shrink-0 items-center justify-center rounded-[3px] border font-semibold uppercase ${box} ${styles[type]}`}
     >
       {labelMap[type]}
     </div>
@@ -2026,7 +2484,7 @@ function ActivityBadge({ kind }: { kind: ActivityKind }) {
           : 'border-[#d4d0c8] text-[#5f5f5f]'
 
   return (
-    <span className={`rounded-[3px] border px-2 py-0.5 text-[11px] uppercase tracking-[0.04em] ${styles}`}>
+    <span className={`rounded-[3px] border px-2 py-0.5 text-[13px] uppercase tracking-[0.04em] ${styles}`}>
       {labelMap[kind]}
     </span>
   )
@@ -2035,7 +2493,7 @@ function ActivityBadge({ kind }: { kind: ActivityKind }) {
 function MemoryBlock({ title, items }: { title: string; items: string[] }) {
   return (
     <div>
-      <p className="text-[11px] uppercase tracking-[0.08em] text-[#9a9a9a]">{title}</p>
+      <p className="text-[13px] uppercase tracking-[0.08em] text-[#9a9a9a]">{title}</p>
       <div className="mt-3 space-y-2">
         {items.map((item) => (
           <div

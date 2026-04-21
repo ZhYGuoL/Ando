@@ -1,3 +1,5 @@
+import { useRef } from 'react'
+
 export type PermissionCardState =
   | 'pending'
   | 'reviewing'
@@ -53,6 +55,7 @@ const RESOURCE = 'src/auth/session.ts'
 const DESCRIPTION =
   'This change updates how sessions are validated. It can affect sign-in for everyone using the app.'
 
+
 function Divider({ compact }: { compact?: boolean }) {
   return (
     <div
@@ -91,32 +94,44 @@ export function PermissionCard({
     state === 'always-allowed-resolved' ||
     state === 'cancelled'
 
-  const pad = isCompact ? 'py-3 px-4' : 'p-6'
+  const lastExpandedStateRef = useRef<PermissionCardExpandedState>(
+    !isCompact ? (state as PermissionCardExpandedState) : 'pending',
+  )
+  if (!isCompact) {
+    lastExpandedStateRef.current = state as PermissionCardExpandedState
+  }
 
   return (
     <div
-      className={`nave-surface rounded-[6px] border max-w-full mt-0 ${pad} nave-float`}
+      className="nave-surface rounded-[6px] border max-w-full mt-0 nave-float overflow-hidden"
       style={{
         borderWidth: 0.5,
         borderColor: C.border,
         backgroundColor: C.cardSurface,
-        transitionProperty:
-          'border-color, background-color, opacity, transform',
+        padding: isCompact ? '12px 16px' : '24px',
+        transition:
+          'padding var(--nave-structure-duration) var(--nave-structure-ease), border-color var(--nave-float-duration-short) ease-out, background-color var(--nave-float-duration-short) ease-out',
       }}
     >
-      {isCompact ? (
-        <CompactBody
-          state={state as PermissionCardCompactState}
-          policyAgent={copy.policyAgent}
-          policyGlob={copy.policyGlob}
-        />
-      ) : (
-        <ExpandedBody
-          state={state as PermissionCardExpandedState}
-          copy={copy}
-          actions={actions}
-        />
-      )}
+      <div className="nave-collapse-section" data-collapsed={isCompact || undefined}>
+        <div className="nave-collapse-inner">
+          <ExpandedBody
+            state={lastExpandedStateRef.current}
+            copy={copy}
+            actions={isCompact ? undefined : actions}
+          />
+        </div>
+      </div>
+
+      <div className="nave-collapse-section" data-collapsed={!isCompact || undefined}>
+        <div className="nave-collapse-inner">
+          <CompactBody
+            state={isCompact ? (state as PermissionCardCompactState) : 'approved'}
+            policyAgent={copy.policyAgent}
+            policyGlob={copy.policyGlob}
+          />
+        </div>
+      </div>
     </div>
   )
 }
@@ -146,19 +161,19 @@ function ExpandedBody({
       {showDetailBlock ? (
         <>
           <h3
-            className="m-0 text-[18px] font-medium tracking-[-0.01em] leading-[1.3]"
+            className="m-0 text-[13px] font-medium tracking-[-0.01em] leading-[1.3]"
             style={{ color: C.primary }}
           >
             {copy.actionTitle}
           </h3>
           <code
-            className="mt-2 block font-mono text-[14px] leading-[1.6] break-all"
+            className="mt-2 block font-mono text-[13px] leading-[1.6] break-all"
             style={{ color: C.primary }}
           >
             {copy.resource}
           </code>
           <p
-            className="mt-3 mb-0 text-[14px] leading-[1.6]"
+            className="mt-3 mb-0 text-[13px] leading-[1.6]"
             style={{ color: C.primary }}
           >
             {copy.description}
@@ -177,7 +192,7 @@ function ExpandedBody({
         <>
           <Divider />
           <p
-            className="m-0 text-[14px] leading-[1.6]"
+            className="m-0 text-[13px] leading-[1.6]"
             style={{ color: C.primary }}
           >
             Maya is reviewing this request.
@@ -189,7 +204,7 @@ function ExpandedBody({
         <>
           <Divider />
           <p
-            className="m-0 text-[14px] leading-[1.6]"
+            className="m-0 text-[13px] leading-[1.6]"
             style={{ color: C.primary }}
           >
             This will allow {copy.policyAgent} to write to{' '}
@@ -229,43 +244,42 @@ function ExpandedBody({
 function ActionsPending({ actions }: { actions?: PermissionCardInteractionHandlers }) {
   const interactive = Boolean(actions)
   return (
-    <div className="flex flex-wrap gap-2">
-      <button
-        type="button"
-        onClick={actions?.onApprove}
-        className={`nave-float nave-rise rounded-[4px] border-0 px-4 py-2 text-[13px] font-normal ${interactive ? 'cursor-pointer' : 'cursor-default'}`}
-        style={{
-          backgroundColor: C.ikb,
-          color: C.onIkb,
-        }}
-      >
-        Approve
-      </button>
-      <button
-        type="button"
-        onClick={actions?.onDeny}
-        className={`nave-float nave-rise rounded-[4px] bg-transparent px-4 py-2 text-[13px] font-normal hover:bg-[#f5f4f0] ${interactive ? 'cursor-pointer' : 'cursor-default'}`}
-        style={{
-          color: C.primary,
-          borderWidth: 0.5,
-          borderStyle: 'solid',
-          borderColor: C.border,
-        }}
-      >
-        Deny
-      </button>
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={actions?.onApprove}
+          className={`nave-float nave-rise rounded-[4px] border-0 px-4 py-2 text-[13px] font-normal ${interactive ? 'cursor-pointer' : 'cursor-default'}`}
+          style={{
+            backgroundColor: C.ikb,
+            color: C.onIkb,
+          }}
+        >
+          Approve
+        </button>
+        <button
+          type="button"
+          onClick={actions?.onDeny}
+          className={`nave-float nave-rise rounded-[4px] bg-transparent px-4 py-2 text-[13px] font-normal hover:bg-[#f5f4f0] ${interactive ? 'cursor-pointer' : 'cursor-default'}`}
+          style={{
+            color: C.primary,
+            borderWidth: 0.5,
+            borderStyle: 'solid',
+            borderColor: C.border,
+          }}
+        >
+          Deny
+        </button>
+      </div>
       <button
         type="button"
         onClick={actions?.onAlwaysAllow}
-        className={`nave-float nave-rise rounded-[4px] bg-transparent px-4 py-2 text-[13px] font-normal hover:bg-[#f5f4f0] ${interactive ? 'cursor-pointer' : 'cursor-default'}`}
+        className={`nave-float self-start rounded-[4px] border-0 bg-transparent px-0 py-0 text-left text-[13px] font-normal underline decoration-from-font underline-offset-[0.2em] ${interactive ? 'nave-rise cursor-pointer' : 'cursor-default'}`}
         style={{
-          color: C.primary,
-          borderWidth: 0.5,
-          borderStyle: 'solid',
-          borderColor: C.border,
+          color: C.ikb,
         }}
       >
-        Always allow this pattern →
+        Always allow this pattern
       </button>
     </div>
   )
@@ -282,21 +296,21 @@ function CompactBody({
 }) {
   if (state === 'approved') {
     return (
-      <p className="m-0 text-[12px] leading-[1.5]" style={{ color: C.muted }}>
+      <p className="m-0 text-[13px] leading-[1.5]" style={{ color: C.muted }}>
         Maya approved · Apr 2, 2026 · 14:34
       </p>
     )
   }
   if (state === 'denied') {
     return (
-      <p className="m-0 text-[12px] leading-[1.5]" style={{ color: C.muted }}>
+      <p className="m-0 text-[13px] leading-[1.5]" style={{ color: C.muted }}>
         Maya denied · Apr 2, 2026 · 14:35
       </p>
     )
   }
   if (state === 'cancelled') {
     return (
-      <p className="m-0 text-[12px] leading-[1.5]" style={{ color: C.muted }}>
+      <p className="m-0 text-[13px] leading-[1.5]" style={{ color: C.muted }}>
         This request is no longer active because the agent was stopped. No approval
         or denial was recorded.
       </p>
@@ -305,15 +319,15 @@ function CompactBody({
   if (state === 'always-allowed-resolved') {
     return (
       <div className="flex flex-col gap-2">
-        <p className="m-0 text-[12px] leading-[1.5]" style={{ color: C.muted }}>
+        <p className="m-0 text-[13px] leading-[1.5]" style={{ color: C.muted }}>
           Maya approved · Apr 2, 2026 · 14:36
         </p>
-        <p className="m-0 text-[12px] leading-[1.5]" style={{ color: C.muted }}>
+        <p className="m-0 text-[13px] leading-[1.5]" style={{ color: C.muted }}>
           Standing rule created for this agent. Future writes matching the pattern
           skip approval until revoked.
         </p>
         <span
-          className="inline-flex w-fit items-center rounded-[3px] border px-2.5 py-0.5 text-[11px] tracking-[0.04em] uppercase"
+          className="inline-flex w-fit items-center rounded-[3px] border px-2.5 py-0.5 text-[13px] tracking-[0.04em] uppercase"
           style={{
             borderWidth: 0.5,
             borderColor: C.ikb,

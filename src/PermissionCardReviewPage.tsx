@@ -20,7 +20,7 @@ const PLACEHOLDER_MSG = (
 function StateLabel({ state }: { state: PermissionCardState }) {
   return (
     <p
-      className="m-0 mb-2 text-[11px] font-normal uppercase tracking-[0.08em] leading-none"
+      className="m-0 mb-2 text-[13px] font-normal uppercase tracking-[0.08em] leading-none"
       style={{ color: C.muted }}
     >
       {state}

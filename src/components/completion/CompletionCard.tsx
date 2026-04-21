@@ -104,19 +104,19 @@ function StatCell({
   return (
     <div>
       <p
-        className="m-0 text-[11px] font-normal uppercase tracking-[0.08em] leading-none"
+        className="m-0 text-[13px] font-normal uppercase tracking-[0.08em] leading-none"
         style={{ color: C.muted }}
       >
         {label}
       </p>
       <p
-        className="mt-2 m-0 text-[24px] font-medium tracking-[-0.01em] leading-none"
+        className="mt-2 m-0 text-[13px] font-medium tracking-[-0.01em] leading-none"
         style={{ color: valueColor }}
       >
         {value}
         {note ? (
           <span
-            className="ml-1.5 text-[12px] font-normal normal-case tracking-normal"
+            className="ml-1.5 text-[13px] font-normal normal-case tracking-normal"
             style={{ color: C.muted }}
           >
             ({note})
@@ -177,13 +177,13 @@ export function CompletionCard({ state, taskName, stats }: CompletionCardProps) 
         <StatusDot color={dotColor} />
         <div className="min-w-0 flex-1">
           <h3
-            className="m-0 text-[18px] font-medium tracking-[-0.01em] leading-[1.3]"
+            className="m-0 text-[13px] font-medium tracking-[-0.01em] leading-[1.3]"
             style={{ color: C.primary }}
           >
             {title}
           </h3>
           <p
-            className="mt-1 m-0 text-[12px] font-normal leading-[1.5]"
+            className="mt-1 m-0 text-[13px] font-normal leading-[1.5]"
             style={{ color: C.muted }}
           >
             {s.durationLabel}
@@ -197,7 +197,7 @@ export function CompletionCard({ state, taskName, stats }: CompletionCardProps) 
 
       {s.hint ? (
         <p
-          className="mt-4 mb-0 text-[14px] leading-[1.6]"
+          className="mt-4 mb-0 text-[13px] leading-[1.6]"
           style={{ color: state === 'failed' ? C.failed : C.primary }}
         >
           {s.hint}

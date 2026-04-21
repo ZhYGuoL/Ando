@@ -16,7 +16,7 @@ const AGENT_COPY = (
 function StateLabel({ state }: { state: CompletionCardState }) {
   return (
     <p
-      className="m-0 mb-2 text-[11px] font-normal uppercase tracking-[0.08em] leading-none"
+      className="m-0 mb-2 text-[13px] font-normal uppercase tracking-[0.08em] leading-none"
       style={{ color: C.muted }}
     >
       {state}
@@ -40,7 +40,7 @@ export default function CompletionCardReviewPage() {
       >
         Completion card — dev review
       </h1>
-      <p className="m-0 mb-10 max-w-[42rem] text-[14px] leading-[1.6]" style={{ color: C.primary }}>
+      <p className="m-0 mb-10 max-w-[42rem] text-[13px] leading-[1.6]" style={{ color: C.primary }}>
         Feed-embedded task outcome. States follow the agent lifecycle (running through honest
         completions). Same shell as the permission card; agent row styling per product spec.
       </p>
